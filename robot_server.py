@@ -11,7 +11,7 @@ def log(msg: str) -> None:
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{now}] {msg}")
 
-async def handle_connection(websocket: websockets.WebSocketServerProtocol):
+async def handle_connection(websocket):
     log(f"Client connected: {websocket.remote_address}")
     try:
         async for message in websocket:

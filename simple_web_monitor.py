@@ -344,21 +344,21 @@ async def index_handler(request):
                 <div class="stat-label" style="font-size: 0.7em; color: #888;">Small packets</div>
             </div>
             <div class="stat-card">
-                <div class="stat-label">WebRTC 8KB Frame</div>
+                <div class="stat-label">30fps 8KB Stream</div>
                 <div id="webrtc-8kb" class="stat-value" style="color: #e83e8c;">--</div>
-                <div class="stat-label">ms Age (One-way)</div>
+                <div class="stat-label">ms Avg Age</div>
                 <div class="stat-label" style="font-size: 0.7em; color: #888;">Low quality video</div>
             </div>
             <div class="stat-card">
-                <div class="stat-label">WebRTC 32KB Frame</div>
+                <div class="stat-label">30fps 32KB Stream</div>
                 <div id="webrtc-32kb" class="stat-value" style="color: #dc3545;">--</div>
-                <div class="stat-label">ms Age (One-way)</div>
+                <div class="stat-label">ms Avg Age</div>
                 <div class="stat-label" style="font-size: 0.7em; color: #888;">Medium quality video</div>
             </div>
             <div class="stat-card">
-                <div class="stat-label">WebRTC 64KB Frame</div>
+                <div class="stat-label">30fps 64KB Stream</div>
                 <div id="webrtc-64kb" class="stat-value" style="color: #6f42c1;">--</div>
-                <div class="stat-label">ms Age (One-way)</div>
+                <div class="stat-label">ms Avg Age</div>
                 <div class="stat-label" style="font-size: 0.7em; color: #888;">High quality video</div>
             </div>
         </div>
@@ -450,13 +450,14 @@ async def index_handler(request):
                 </div>
 
                 <div style="margin-top: 10px;">
-                    <strong style="color: #e83e8c;">🤖 WebRTC Frame Age Testing (realistic teleoperation):</strong>
+                    <strong style="color: #e83e8c;">🎥 30fps Video Stream Testing (realistic teleoperation):</strong>
                     <div style="margin-left: 20px; margin-top: 5px;">
-                        • <strong>Timestamped Frames:</strong> Each frame includes send timestamp<br>
-                        • <strong>Frame Age Measurement:</strong> How old is the video data when received<br>
+                        • <strong>30fps Streams:</strong> 60 frames over 2 seconds per test<br>
+                        • <strong>Frame Age Analysis:</strong> Average, min, max, and jitter measurements<br>
                         • <strong>Multiple Qualities:</strong> 8KB (low), 32KB (medium), 64KB (high)<br>
-                        • <strong>One-way Latency:</strong> Most relevant for teleoperation video streams<br>
-                        • <strong>Realistic Payloads:</strong> Simulates actual video frame sizes
+                        • <strong>Sustained Load:</strong> Tests network under continuous video traffic<br>
+                        • <strong>Jitter Measurement:</strong> Frame age variation critical for smooth control<br>
+                        • <strong>Real Teleoperation:</strong> Simulates actual robot video streaming
                     </div>
                 </div>
             </div>
@@ -717,8 +718,9 @@ async def index_handler(request):
                     updateWebRTCInfo();
                 }, 3000);
                 
-                // WebRTC Frame Size Tests - staggered across cycle
+                // WebRTC 30fps Stream Tests - spaced for 3 second streams each
                 setTimeout(async () => {
+                    document.getElementById('webrtc-8kb').textContent = 'Testing...';
                     const eightKbLatency = await testWebRTCVideoSimulation(); // 8KB
                     if (eightKbLatency > 0) {
                         document.getElementById('webrtc-8kb').textContent = Math.round(eightKbLatency);
@@ -728,23 +730,25 @@ async def index_handler(request):
                 }, 3500);
                 
                 setTimeout(async () => {
+                    document.getElementById('webrtc-32kb').textContent = 'Testing...';
                     const thirtyTwoKbLatency = await testWebRTCMediumVideo(); // 32KB
                     if (thirtyTwoKbLatency > 0) {
                         document.getElementById('webrtc-32kb').textContent = Math.round(thirtyTwoKbLatency);
                     } else {
                         document.getElementById('webrtc-32kb').textContent = 'ERR';
                     }
-                }, 4500);
+                }, 7000); // 3.5 seconds after first test
                 
                 setTimeout(async () => {
+                    document.getElementById('webrtc-64kb').textContent = 'Testing...';
                     const sixtyFourKbLatency = await testWebRTCHighVideo(); // 64KB
                     if (sixtyFourKbLatency > 0) {
                         document.getElementById('webrtc-64kb').textContent = Math.round(sixtyFourKbLatency);
                     } else {
                         document.getElementById('webrtc-64kb').textContent = 'ERR';
                     }
-                }, 5500);
-            }, 8000); // Every 8 seconds with staggered requests (more tests now)
+                }, 10500); // 3.5 seconds after second test
+            }, 15000); // Every 15 seconds (30fps streams take ~3 seconds each)
         }
         
         function stopMeasurements() {
@@ -1021,11 +1025,9 @@ async def index_handler(request):
             }
         }
 
-        // WebRTC Frame Size Testing - test different video qualities
+        // WebRTC Frame Size Testing - 30fps video stream simulation
         async function testWebRTCFrameSize(frameSize, label) {
             try {
-                const start = performance.now();
-                
                 const localPc = new RTCPeerConnection();
                 const remotePc = new RTCPeerConnection();
                 
@@ -1036,36 +1038,47 @@ async def index_handler(request):
                 
                 return new Promise((resolve) => {
                     let resolved = false;
+                    let framesSent = 0;
+                    let framesReceived = 0;
+                    let frameAges = [];
+                    let sendInterval = null;
+                    const targetFrames = 60; // 2 seconds at 30fps
+                    const frameInterval = 1000 / 30; // 33.33ms between frames
                     
                     const timeout = setTimeout(() => {
                         if (!resolved) {
                             resolved = true;
-                            console.log(`${label} frame RTT timeout`);
+                            console.log(`${label} stream timeout`);
+                            if (sendInterval) clearInterval(sendInterval);
                             localPc.close();
                             remotePc.close();
                             resolve(-1);
                         }
-                    }, 5000);
+                    }, 10000);
                     
                     // Remote peer echoes frames back (simulates robot processing)
                     remotePc.ondatachannel = (event) => {
                         const remoteChannel = event.channel;
                         remoteChannel.onopen = () => {
-                            console.log(`${label} remote channel ready`);
+                            console.log(`${label} remote channel ready for 30fps stream`);
                         };
                         
                         remoteChannel.onmessage = (e) => {
                             if (e.data instanceof ArrayBuffer) {
                                 try {
-                                    // Extract timestamp to show frame age at "robot" side
+                                    // Extract frame number and timestamp
                                     const frameView = new Uint8Array(e.data);
-                                    const timestampBuffer = frameView.slice(0, 8).buffer;
-                                    const timestampArray = new Float64Array(timestampBuffer);
-                                    const originalTimestamp = timestampArray[0];
+                                    const headerView = new Float64Array(frameView.slice(0, 16).buffer);
+                                    const originalTimestamp = headerView[0];
+                                    const frameNumber = headerView[1];
+                                    
                                     const robotReceiveTime = performance.now();
                                     const frameAgeAtRobot = robotReceiveTime - originalTimestamp;
                                     
-                                    console.log(`${label} robot received frame (age: ${frameAgeAtRobot.toFixed(1)}ms)`);
+                                    // Log every 10th frame to avoid spam
+                                    if (frameNumber % 10 === 0) {
+                                        console.log(`${label} robot frame #${frameNumber} (age: ${frameAgeAtRobot.toFixed(1)}ms)`);
+                                    }
                                     
                                     // Echo frame back immediately (simulate robot response)
                                     remoteChannel.send(e.data);
@@ -1076,58 +1089,93 @@ async def index_handler(request):
                         };
                     };
                     
-                    // Local peer sends frame with timestamp and measures RTT
+                    // Local peer sends 30fps stream with timestamps
                     dataChannel.onopen = () => {
-                        console.log(`Testing ${label} frame (${frameSize} bytes)`);
+                        console.log(`Starting ${label} 30fps stream (${frameSize} bytes per frame)`);
                         
-                        // Create frame with timestamp header
-                        const timestamp = performance.now();
-                        const timestampBytes = new Float64Array([timestamp]);
-                        const timestampBuffer = timestampBytes.buffer;
-                        
-                        // Create full frame: timestamp (8 bytes) + padding
-                        const frame = new ArrayBuffer(frameSize);
-                        const frameView = new Uint8Array(frame);
-                        const timestampView = new Uint8Array(timestampBuffer);
-                        
-                        // Copy timestamp to beginning of frame
-                        frameView.set(timestampView, 0);
-                        
-                        // Fill rest with pattern (optional - simulates video data)
-                        for (let i = 8; i < frameSize; i++) {
-                            frameView[i] = i % 256;
-                        }
-                        
-                        console.log(`Sending ${label} frame at ${timestamp.toFixed(3)}ms`);
-                        dataChannel.send(frame);
+                        // Start sending frames at 30fps
+                        sendInterval = setInterval(() => {
+                            if (framesSent >= targetFrames) {
+                                clearInterval(sendInterval);
+                                return;
+                            }
+                            
+                            const timestamp = performance.now();
+                            
+                            // Create frame with timestamp + frame number header (16 bytes total)
+                            const frame = new ArrayBuffer(frameSize);
+                            const frameView = new Uint8Array(frame);
+                            const headerArray = new Float64Array([timestamp, framesSent]);
+                            const headerView = new Uint8Array(headerArray.buffer);
+                            
+                            // Copy header to beginning of frame
+                            frameView.set(headerView, 0);
+                            
+                            // Fill rest with video-like pattern
+                            for (let i = 16; i < frameSize; i++) {
+                                frameView[i] = (framesSent + i) % 256;
+                            }
+                            
+                            try {
+                                dataChannel.send(frame);
+                                framesSent++;
+                                
+                                if (framesSent % 15 === 0) { // Log every half second
+                                    console.log(`${label} sent frame #${framesSent}/${targetFrames}`);
+                                }
+                            } catch (error) {
+                                console.warn(`${label} send error:`, error);
+                                clearInterval(sendInterval);
+                            }
+                        }, frameInterval);
                     };
                     
                     dataChannel.onmessage = (e) => {
-                        if (e.data instanceof ArrayBuffer && !resolved) {
-                            resolved = true;
-                            clearTimeout(timeout);
+                        if (e.data instanceof ArrayBuffer) {
                             const receiveTime = performance.now();
                             
-                            // Extract timestamp from received frame
+                            // Extract timestamp and frame number from received frame
                             const frameView = new Uint8Array(e.data);
-                            const timestampBuffer = frameView.slice(0, 8).buffer;
-                            const timestampArray = new Float64Array(timestampBuffer);
-                            const originalTimestamp = timestampArray[0];
+                            const headerArray = new Float64Array(frameView.slice(0, 16).buffer);
+                            const originalTimestamp = headerArray[0];
+                            const frameNumber = headerArray[1];
                             
-                            // Calculate frame age (one-way latency) and RTT
+                            // Calculate frame age (one-way latency)
                             const frameAge = receiveTime - originalTimestamp;
-                            const frameRTT = receiveTime - start;
+                            frameAges.push(frameAge);
+                            framesReceived++;
                             
-                            console.log(`${label} frame received:
-  - Frame age: ${frameAge.toFixed(1)}ms (actual video latency)
-  - Round trip: ${frameRTT.toFixed(1)}ms (ping + processing)
+                            // Log every 10th frame to avoid spam
+                            if (framesReceived % 10 === 0) {
+                                console.log(`${label} received frame #${frameNumber} (age: ${frameAge.toFixed(1)}ms)`);
+                            }
+                            
+                            // Check if we've received all frames
+                            if (framesReceived >= targetFrames && !resolved) {
+                                resolved = true;
+                                clearTimeout(timeout);
+                                if (sendInterval) clearInterval(sendInterval);
+                                
+                                // Calculate statistics
+                                const avgAge = frameAges.reduce((a, b) => a + b, 0) / frameAges.length;
+                                const minAge = Math.min(...frameAges);
+                                const maxAge = Math.max(...frameAges);
+                                const jitter = maxAge - minAge;
+                                
+                                console.log(`${label} 30fps stream complete:
+  - Frames: ${framesReceived}/${targetFrames}
+  - Avg age: ${avgAge.toFixed(1)}ms
+  - Min age: ${minAge.toFixed(1)}ms  
+  - Max age: ${maxAge.toFixed(1)}ms
+  - Jitter: ${jitter.toFixed(1)}ms
   - Frame size: ${e.data.byteLength} bytes`);
-                            
-                            localPc.close();
-                            remotePc.close();
-                            
-                            // Return the frame age (more relevant for teleoperation)
-                            resolve(frameAge);
+                                
+                                localPc.close();
+                                remotePc.close();
+                                
+                                // Return average frame age
+                                resolve(avgAge);
+                            }
                         }
                     };
                     
