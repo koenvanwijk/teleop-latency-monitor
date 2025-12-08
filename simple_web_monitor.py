@@ -314,6 +314,7 @@ async def index_handler(request):
                     <div style="margin-top: 10px; color: white;">
                         <div>Browser: <span id="topo-eindhoven-browser" style="font-weight: bold;">--</span>ms</div>
                         <div>Server: <span id="topo-eindhoven-server" style="font-weight: bold;">--</span>ms</div>
+                        <div style="font-size: 0.8em; opacity: 0.8;">tue.nl</div>
                     </div>
                 </div>
                 
@@ -325,6 +326,7 @@ async def index_handler(request):
                     <div style="margin-top: 10px; color: white;">
                         <div>Browser: <span id="topo-amsterdam-browser" style="font-weight: bold;">--</span>ms</div>
                         <div>Server: <span id="topo-amsterdam-server" style="font-weight: bold;">--</span>ms</div>
+                        <div style="font-size: 0.8em; opacity: 0.8;">nluug.nl</div>
                     </div>
                 </div>
                 
@@ -336,6 +338,7 @@ async def index_handler(request):
                     <div style="margin-top: 10px; color: white;">
                         <div>Browser: <span id="topo-sofia-browser" style="font-weight: bold;">--</span>ms</div>
                         <div>Server: <span id="topo-sofia-server" style="font-weight: bold;">--</span>ms</div>
+                        <div style="font-size: 0.8em; opacity: 0.8;">uni-sofia.bg</div>
                     </div>
                 </div>
                 
@@ -345,7 +348,8 @@ async def index_handler(request):
                         🌐<br>Google STUN
                     </div>
                     <div style="margin-top: 10px; color: white;">
-                        <div>Browser: <span id="topo-stun-google" style="font-weight: bold;">--</span>ms</div>
+                        <div>Browser: <span id="topo-stun-google-browser" style="font-weight: bold;">--</span>ms</div>
+                        <div>Server: <span id="topo-stun-google-server" style="font-weight: bold;">--</span>ms</div>
                         <div style="font-size: 0.8em; opacity: 0.8;">stun.l.google.com</div>
                     </div>
                 </div>
@@ -356,7 +360,8 @@ async def index_handler(request):
                         ☁️<br>Cloudflare STUN
                     </div>
                     <div style="margin-top: 10px; color: white;">
-                        <div>Browser: <span id="topo-stun-cloudflare" style="font-weight: bold;">--</span>ms</div>
+                        <div>Browser: <span id="topo-stun-cloudflare-browser" style="font-weight: bold;">--</span>ms</div>
+                        <div>Server: <span id="topo-stun-cloudflare-server" style="font-weight: bold;">--</span>ms</div>
                         <div style="font-size: 0.8em; opacity: 0.8;">stun.cloudflare.com</div>
                     </div>
                 </div>
@@ -1509,8 +1514,10 @@ async def index_handler(request):
             document.getElementById('topo-webrtc-64kb').textContent = document.getElementById('webrtc-64kb').textContent;
             
             // STUN tests
-            document.getElementById('topo-stun-google').textContent = document.getElementById('stun-google-browser').textContent;
-            document.getElementById('topo-stun-cloudflare').textContent = document.getElementById('stun-cloudflare-browser').textContent;
+            document.getElementById('topo-stun-google-browser').textContent = document.getElementById('stun-google-browser').textContent;
+            document.getElementById('topo-stun-google-server').textContent = document.getElementById('stun-google-server').textContent;
+            document.getElementById('topo-stun-cloudflare-browser').textContent = document.getElementById('stun-cloudflare-browser').textContent;
+            document.getElementById('topo-stun-cloudflare-server').textContent = document.getElementById('stun-cloudflare-server').textContent;
             
             // Status
             const statusEl = document.getElementById('status');
