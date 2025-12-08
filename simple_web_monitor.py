@@ -3,6 +3,8 @@ import argparse
 import asyncio
 import json
 import time
+import socket
+import struct
 from aiohttp import web, WSMsgType
 import websockets
 
@@ -31,6 +33,52 @@ async def ping_server(hostname):
     except Exception as e:
         print(f"Ping error for {hostname}: {e}")
     return None, None
+
+async def stun_test_server(stun_host, stun_port=3478):
+    """Perform STUN binding request from server and measure latency"""
+    try:
+        start_time = time.time()
+        
+        # Create UDP socket
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.settimeout(5.0)
+        
+        # STUN Binding Request message
+        # Message Type: Binding Request (0x0001)
+        # Message Length: 0 (no attributes)
+        # Magic Cookie: 0x2112A442
+        # Transaction ID: 12 random bytes
+        import os
+        transaction_id = os.urandom(12)
+        
+        # Pack STUN header
+        message_type = 0x0001  # Binding Request
+        message_length = 0     # No attributes
+        magic_cookie = 0x2112A442
+        
+        stun_header = struct.pack('!HHI', message_type, message_length, magic_cookie) + transaction_id
+        
+        # Send STUN request
+        sock.sendto(stun_header, (stun_host, stun_port))
+        
+        # Receive response
+        data, addr = sock.recvfrom(1024)
+        end_time = time.time()
+        
+        sock.close()
+        
+        # Verify this is a STUN Binding Response
+        if len(data) >= 20:
+            response_type, response_length = struct.unpack('!HH', data[:4])
+            if response_type == 0x0101:  # Binding Response
+                latency_ms = (end_time - start_time) * 1000
+                return latency_ms
+        
+        return None
+        
+    except Exception as e:
+        print(f"STUN error for {stun_host}:{stun_port}: {e}")
+        return None
 
 async def websocket_proxy_handler(request):
     """WebSocket proxy between browser and robot server + server-side ping handler"""
@@ -69,6 +117,31 @@ async def websocket_proxy_handler(request):
                                         'latency': latency,
                                         'ip': ip_address,
                                         'hostname': hostnames[target]
+                                    }
+                                    await ws_browser.send_str(json.dumps(response))
+                            
+                            # Handle server-side STUN requests
+                            elif data.get('type') == 'server_stun':
+                                stun_target = data.get('target')
+                                stun_id = data.get('id')
+                                
+                                # Perform server-side STUN test
+                                if stun_target in ['google', 'cloudflare']:
+                                    stun_servers = {
+                                        'google': 'stun.l.google.com',
+                                        'cloudflare': 'stun.cloudflare.com'
+                                    }
+                                    stun_host = stun_servers[stun_target]
+                                    stun_port = 19302 if stun_target == 'google' else 3478
+                                    
+                                    latency = await stun_test_server(stun_host, stun_port)
+                                    
+                                    response = {
+                                        'type': 'server_stun_result',
+                                        'target': stun_target,
+                                        'id': stun_id,
+                                        'latency': latency,
+                                        'stun_server': f"{stun_host}:{stun_port}"
                                     }
                                     await ws_browser.send_str(json.dumps(response))
                             else:
@@ -240,6 +313,54 @@ async def index_handler(request):
                 <div class="stat-label">ms (WebSocket)</div>
                 <div class="stat-label" style="font-size: 0.7em; color: #888;">uplink/downlink</div>
             </div>
+            <div class="stat-card">
+                <div class="stat-label">STUN Google (Browser)</div>
+                <div id="stun-google-browser" class="stat-value" style="color: #28a745;">--</div>
+                <div class="stat-label">ms RTT (WebRTC)</div>
+                <div class="stat-label" style="font-size: 0.7em; color: #888;">stun.l.google.com:19302</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">STUN Google (Server)</div>
+                <div id="stun-google-server" class="stat-value" style="color: #28a745;">--</div>
+                <div class="stat-label">ms RTT (STUN)</div>
+                <div class="stat-label" style="font-size: 0.7em; color: #888;">stun.l.google.com:19302</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">STUN Cloudflare (Browser)</div>
+                <div id="stun-cloudflare-browser" class="stat-value" style="color: #6f42c1;">--</div>
+                <div class="stat-label">ms RTT (WebRTC)</div>
+                <div class="stat-label" style="font-size: 0.7em; color: #888;">stun.cloudflare.com:3478</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">STUN Cloudflare (Server)</div>
+                <div id="stun-cloudflare-server" class="stat-value" style="color: #6f42c1;">--</div>
+                <div class="stat-label">ms RTT (STUN)</div>
+                <div class="stat-label" style="font-size: 0.7em; color: #888;">stun.cloudflare.com:3478</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">WebRTC Robot Echo</div>
+                <div id="webrtc-robot-echo" class="stat-value" style="color: #fd7e14;">--</div>
+                <div class="stat-label">ms RTT (WebRTC)</div>
+                <div class="stat-label" style="font-size: 0.7em; color: #888;">Small packets</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">WebRTC 8KB Frame</div>
+                <div id="webrtc-8kb" class="stat-value" style="color: #e83e8c;">--</div>
+                <div class="stat-label">ms RTT (WebRTC)</div>
+                <div class="stat-label" style="font-size: 0.7em; color: #888;">Low quality video</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">WebRTC 32KB Frame</div>
+                <div id="webrtc-32kb" class="stat-value" style="color: #dc3545;">--</div>
+                <div class="stat-label">ms RTT (WebRTC)</div>
+                <div class="stat-label" style="font-size: 0.7em; color: #888;">Medium quality video</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">WebRTC 64KB Frame</div>
+                <div id="webrtc-64kb" class="stat-value" style="color: #6f42c1;">--</div>
+                <div class="stat-label">ms RTT (WebRTC)</div>
+                <div class="stat-label" style="font-size: 0.7em; color: #888;">High quality video</div>
+            </div>
         </div>
         
         <div class="chart-container">
@@ -261,6 +382,82 @@ async def index_handler(request):
                     <tbody id="measurements-tbody">
                     </tbody>
                 </table>
+            </div>
+        </div>
+
+        <!-- WebRTC Setup Information -->
+        <div class="chart-container">
+            <h3>WebRTC Infrastructure Requirements</h3>
+            <div style="background-color: #f8f9fa; padding: 20px; border-radius: 8px; font-family: monospace; font-size: 14px;">
+                <div style="margin-bottom: 15px;">
+                    <strong style="color: #28a745;">✓ Currently Testing:</strong>
+                    <div style="margin-left: 20px; margin-top: 5px;">
+                        • <strong>STUN Servers:</strong> Google (stun.l.google.com:19302), Cloudflare (stun.cloudflare.com:3478)<br>
+                        • <strong>Local WebRTC:</strong> P2P simulation for latency testing<br>
+                        • <strong>ICE Gathering:</strong> Measuring NAT traversal performance
+                    </div>
+                </div>
+                
+                <div style="margin-bottom: 15px;">
+                    <strong style="color: #ffc107;">⚠ For Production WebRTC (Robot ↔ Browser):</strong>
+                    <div style="margin-left: 20px; margin-top: 5px;">
+                        • <strong>Signaling Server:</strong> WebSocket/Socket.IO for SDP offer/answer exchange<br>
+                        • <strong>STUN Server:</strong> For NAT discovery and public IP detection<br>
+                        • <strong>TURN Server:</strong> Relay server for symmetric NAT/firewall traversal<br>
+                        • <strong>ICE Framework:</strong> Connectivity establishment (STUN + TURN candidates)
+                    </div>
+                </div>
+                
+                <div style="margin-bottom: 15px;">
+                    <strong style="color: #dc3545;">✗ Challenges for Robot Teleoperation:</strong>
+                    <div style="margin-left: 20px; margin-top: 5px;">
+                        • <strong>Symmetric NAT:</strong> Many corporate/mobile networks block direct P2P<br>
+                        • <strong>TURN Costs:</strong> Relay servers require bandwidth allocation<br>
+                        • <strong>Firewall Policy:</strong> Robot networks often restrict outbound connections<br>
+                        • <strong>Latency Variability:</strong> ICE negotiation + TURN relay adds overhead
+                    </div>
+                </div>
+                
+                <div>
+                    <strong style="color: #6f42c1;">💡 Current Test Results Indicate:</strong>
+                    <div style="margin-left: 20px; margin-top: 5px;">
+                        • <strong>STUN Latency:</strong> <span id="webrtc-info-stun">--</span> ms (NAT traversal time)<br>
+                        • <strong>WebRTC Small Packets:</strong> <span id="webrtc-info-local">--</span> ms (text ping/pong)<br>
+                        • <strong>WebRTC Teleoperation:</strong> <span id="webrtc-info-video">--</span> ms (realistic robot video)<br>
+                        • <strong>WebSocket (current):</strong> <span id="webrtc-info-websocket">--</span> ms (existing robot connection)
+                    </div>
+                </div>
+
+                <div style="margin-top: 15px;">
+                    <strong style="color: #17a2b8;">🤔 Why WebSocket might be slower than WebRTC:</strong>
+                    <div style="margin-left: 20px; margin-top: 5px;">
+                        • <strong>Network Path:</strong> WebSocket → Web Server → Robot Server (2 hops)<br>
+                        • <strong>Protocol Overhead:</strong> HTTP/WebSocket headers + JSON parsing<br>
+                        • <strong>Server Processing:</strong> Python asyncio + message routing delays<br>
+                        • <strong>TCP vs UDP:</strong> WebSocket uses TCP (reliability overhead)<br>
+                        • <strong>Proxy Layer:</strong> Browser → aiohttp → websockets library → Robot
+                    </div>
+                </div>
+
+                <div style="margin-top: 10px;">
+                    <strong style="color: #28a745;">✓ WebRTC Small Packets are fastest because:</strong>
+                    <div style="margin-left: 20px; margin-top: 5px;">
+                        • <strong>Direct P2P:</strong> No intermediate servers (local loopback)<br>
+                        • <strong>Optimized Stack:</strong> Browser's native WebRTC implementation<br>
+                        • <strong>UDP DataChannel:</strong> Lower protocol overhead<br>
+                        • <strong>Minimal Payload:</strong> Just "ping"/"pong" strings
+                    </div>
+                </div>
+
+                <div style="margin-top: 10px;">
+                    <strong style="color: #e83e8c;">🤖 WebRTC Teleoperation Simulation (realistic):</strong>
+                    <div style="margin-left: 20px; margin-top: 5px;">
+                        • <strong>Robot → Browser:</strong> Large video frames (4KB-16KB at 30fps)<br>
+                        • <strong>Browser → Robot:</strong> Small control commands (10-50 bytes)<br>
+                        • <strong>Asymmetric Traffic:</strong> Heavy downstream, light upstream<br>
+                        • <strong>Realistic Latency:</strong> Actual teleoperation communication pattern
+                    </div>
+                </div>
             </div>
         </div>
     </div>
@@ -438,6 +635,8 @@ async def index_handler(request):
                         handlePongResponse(data);
                     } else if (data.type === 'server_ping_result') {
                         handleServerPingResponse(data);
+                    } else if (data.type === 'server_stun_result') {
+                        handleServerStunResponse(data);
                     }
                 } catch (e) {
                     console.error('Error parsing robot response:', e);
@@ -476,7 +675,75 @@ async def index_handler(request):
                     pingPublicServerFromBrowser('sofia');
                     pingPublicServerFromServer('sofia');
                 }, 1500);
-            }, 4000); // Every 4 seconds with staggered requests
+                
+                // STUN tests (staggered to avoid overload)
+                setTimeout(async () => {
+                    // Browser STUN to Google
+                    const googleBrowserLatency = await testSTUNFromBrowser('stun:stun.l.google.com:19302');
+                    if (googleBrowserLatency > 0) {
+                        document.getElementById('stun-google-browser').textContent = Math.round(googleBrowserLatency);
+                    } else {
+                        document.getElementById('stun-google-browser').textContent = 'ERR';
+                    }
+                    updateWebRTCInfo();
+                    
+                    // Server STUN to Google
+                    stunTestFromServer('google');
+                }, 2000);
+                
+                setTimeout(async () => {
+                    // Browser STUN to Cloudflare
+                    const cloudflareBrowserLatency = await testSTUNFromBrowser('stun:stun.cloudflare.com:3478');
+                    if (cloudflareBrowserLatency > 0) {
+                        document.getElementById('stun-cloudflare-browser').textContent = Math.round(cloudflareBrowserLatency);
+                    } else {
+                        document.getElementById('stun-cloudflare-browser').textContent = 'ERR';
+                    }
+                    updateWebRTCInfo();
+                    
+                    // Server STUN to Cloudflare
+                    stunTestFromServer('cloudflare');
+                }, 2500);
+                
+                // WebRTC Robot Echo test
+                setTimeout(async () => {
+                    const robotEchoLatency = await testWebRTCRobotEcho();
+                    if (robotEchoLatency > 0) {
+                        document.getElementById('webrtc-robot-echo').textContent = Math.round(robotEchoLatency);
+                    } else {
+                        document.getElementById('webrtc-robot-echo').textContent = 'ERR';
+                    }
+                    updateWebRTCInfo();
+                }, 3000);
+                
+                // WebRTC Frame Size Tests - staggered across cycle
+                setTimeout(async () => {
+                    const eightKbLatency = await testWebRTCVideoSimulation(); // 8KB
+                    if (eightKbLatency > 0) {
+                        document.getElementById('webrtc-8kb').textContent = Math.round(eightKbLatency);
+                    } else {
+                        document.getElementById('webrtc-8kb').textContent = 'ERR';
+                    }
+                }, 3500);
+                
+                setTimeout(async () => {
+                    const thirtyTwoKbLatency = await testWebRTCMediumVideo(); // 32KB
+                    if (thirtyTwoKbLatency > 0) {
+                        document.getElementById('webrtc-32kb').textContent = Math.round(thirtyTwoKbLatency);
+                    } else {
+                        document.getElementById('webrtc-32kb').textContent = 'ERR';
+                    }
+                }, 4500);
+                
+                setTimeout(async () => {
+                    const sixtyFourKbLatency = await testWebRTCHighVideo(); // 64KB
+                    if (sixtyFourKbLatency > 0) {
+                        document.getElementById('webrtc-64kb').textContent = Math.round(sixtyFourKbLatency);
+                    } else {
+                        document.getElementById('webrtc-64kb').textContent = 'ERR';
+                    }
+                }, 5500);
+            }, 8000); // Every 8 seconds with staggered requests (more tests now)
         }
         
         function stopMeasurements() {
@@ -596,6 +863,288 @@ async def index_handler(request):
                 }
             }
         }
+
+        // WebRTC STUN connectivity test from browser
+        async function testSTUNFromBrowser(stunServer) {
+            try {
+                const start = performance.now();
+                const pc = new RTCPeerConnection({
+                    iceServers: [{urls: stunServer}]
+                });
+                
+                return new Promise((resolve) => {
+                    let resolved = false;
+                    const timeout = setTimeout(() => {
+                        if (!resolved) {
+                            resolved = true;
+                            pc.close();
+                            resolve(-1);
+                        }
+                    }, 5000);
+                    
+                    pc.onicecandidate = (event) => {
+                        if (event.candidate && event.candidate.candidate.includes('srflx') && !resolved) {
+                            resolved = true;
+                            clearTimeout(timeout);
+                            const end = performance.now();
+                            pc.close();
+                            resolve(end - start);
+                        }
+                    };
+                    
+                    pc.createDataChannel('test');
+                    pc.createOffer().then(offer => pc.setLocalDescription(offer));
+                });
+            } catch (error) {
+                console.error('Browser STUN test error:', error);
+                return -1;
+            }
+        }
+
+        // Server-side STUN request
+        function stunTestFromServer(target) {
+            const stunId = Math.random().toString(36).substr(2, 9);
+            
+            const serverStunRequest = {
+                type: 'server_stun',
+                target: target,
+                id: stunId
+            };
+            
+            if (robotWs && robotWs.readyState === WebSocket.OPEN) {
+                robotWs.send(JSON.stringify(serverStunRequest));
+            }
+        }
+
+        function handleServerStunResponse(data) {
+            const { target, latency, stun_server } = data;
+            if (latency !== null && latency > 0) {
+                document.getElementById(`stun-${target}-server`).textContent = Math.round(latency);
+            } else {
+                document.getElementById(`stun-${target}-server`).textContent = 'ERR';
+            }
+            updateWebRTCInfo();
+        }
+
+        // WebRTC Robot Echo - simulates P2P connection to robot
+        async function testWebRTCRobotEcho() {
+            try {
+                const start = performance.now();
+                
+                // Create local peer connections to simulate robot connection
+                const localPc = new RTCPeerConnection();
+                const remotePc = new RTCPeerConnection();
+                
+                // Create data channel
+                const dataChannel = localPc.createDataChannel('robot-echo', {
+                    ordered: true
+                });
+                
+                return new Promise((resolve) => {
+                    let resolved = false;
+                    const timeout = setTimeout(() => {
+                        if (!resolved) {
+                            resolved = true;
+                            localPc.close();
+                            remotePc.close();
+                            resolve(-1);
+                        }
+                    }, 3000);
+                    
+                    // Set up remote data channel handler
+                    remotePc.ondatachannel = (event) => {
+                        const remoteChannel = event.channel;
+                        remoteChannel.onopen = () => {
+                            // Send echo response
+                            remoteChannel.send('robot-pong');
+                        };
+                        
+                        remoteChannel.onmessage = (e) => {
+                            if (e.data === 'robot-ping') {
+                                remoteChannel.send('robot-pong');
+                            }
+                        };
+                    };
+                    
+                    // Set up local data channel
+                    dataChannel.onopen = () => {
+                        dataChannel.send('robot-ping');
+                    };
+                    
+                    dataChannel.onmessage = (e) => {
+                        if (e.data === 'robot-pong' && !resolved) {
+                            resolved = true;
+                            clearTimeout(timeout);
+                            const end = performance.now();
+                            localPc.close();
+                            remotePc.close();
+                            resolve(end - start);
+                        }
+                    };
+                    
+                    // Set up ICE candidates exchange
+                    localPc.onicecandidate = (e) => {
+                        if (e.candidate) {
+                            remotePc.addIceCandidate(e.candidate);
+                        }
+                    };
+                    
+                    remotePc.onicecandidate = (e) => {
+                        if (e.candidate) {
+                            localPc.addIceCandidate(e.candidate);
+                        }
+                    };
+                    
+                    // Create offer and exchange
+                    localPc.createOffer().then(offer => {
+                        localPc.setLocalDescription(offer);
+                        remotePc.setRemoteDescription(offer);
+                        return remotePc.createAnswer();
+                    }).then(answer => {
+                        remotePc.setLocalDescription(answer);
+                        localPc.setRemoteDescription(answer);
+                    }).catch(() => {
+                        if (!resolved) {
+                            resolved = true;
+                            clearTimeout(timeout);
+                            localPc.close();
+                            remotePc.close();
+                            resolve(-1);
+                        }
+                    });
+                });
+                
+            } catch (error) {
+                console.error('WebRTC Robot Echo error:', error);
+                return -1;
+            }
+        }
+
+        // WebRTC Frame Size Testing - test different video qualities
+        async function testWebRTCFrameSize(frameSize, label) {
+            try {
+                const start = performance.now();
+                
+                const localPc = new RTCPeerConnection();
+                const remotePc = new RTCPeerConnection();
+                
+                const dataChannel = localPc.createDataChannel(`frame-test-${frameSize}`, {
+                    ordered: true,
+                    maxRetransmits: 0
+                });
+                
+                return new Promise((resolve) => {
+                    let resolved = false;
+                    
+                    const timeout = setTimeout(() => {
+                        if (!resolved) {
+                            resolved = true;
+                            console.log(`${label} frame RTT timeout`);
+                            localPc.close();
+                            remotePc.close();
+                            resolve(-1);
+                        }
+                    }, 5000);
+                    
+                    // Remote peer echoes frames back
+                    remotePc.ondatachannel = (event) => {
+                        const remoteChannel = event.channel;
+                        remoteChannel.onmessage = (e) => {
+                            if (e.data instanceof ArrayBuffer) {
+                                try {
+                                    remoteChannel.send(e.data);
+                                } catch (error) {
+                                    console.warn(`${label} remote send error:`, error);
+                                }
+                            }
+                        };
+                    };
+                    
+                    // Local peer sends frame and measures RTT
+                    dataChannel.onopen = () => {
+                        console.log(`Testing ${label} frame (${frameSize} bytes)`);
+                        const frame = new ArrayBuffer(frameSize);
+                        dataChannel.send(frame);
+                    };
+                    
+                    dataChannel.onmessage = (e) => {
+                        if (e.data instanceof ArrayBuffer && !resolved) {
+                            resolved = true;
+                            clearTimeout(timeout);
+                            const end = performance.now();
+                            const frameRTT = end - start;
+                            console.log(`${label} frame RTT: ${Math.round(frameRTT)}ms`);
+                            localPc.close();
+                            remotePc.close();
+                            resolve(frameRTT);
+                        }
+                    };
+                    
+                    dataChannel.onerror = (e) => {
+                        console.error('DataChannel error:', e);
+                        if (!resolved) {
+                            resolved = true;
+                            clearTimeout(timeout);
+                            localPc.close();
+                            remotePc.close();
+                            resolve(-1);
+                        }
+                    };
+                    
+                    // Set up ICE candidates exchange
+                    localPc.onicecandidate = (e) => {
+                        if (e.candidate) {
+                            remotePc.addIceCandidate(e.candidate).catch(console.warn);
+                        }
+                    };
+                    
+                    remotePc.onicecandidate = (e) => {
+                        if (e.candidate) {
+                            localPc.addIceCandidate(e.candidate).catch(console.warn);
+                        }
+                    };
+                    
+                    // Create offer and exchange
+                    localPc.createOffer().then(offer => {
+                        return localPc.setLocalDescription(offer);
+                    }).then(() => {
+                        return remotePc.setRemoteDescription(localPc.localDescription);
+                    }).then(() => {
+                        return remotePc.createAnswer();
+                    }).then(answer => {
+                        return remotePc.setLocalDescription(answer);
+                    }).then(() => {
+                        return localPc.setRemoteDescription(remotePc.localDescription);
+                    }).catch((error) => {
+                        console.error('WebRTC negotiation error:', error);
+                        if (!resolved) {
+                            resolved = true;
+                            clearTimeout(timeout);
+                            localPc.close();
+                            remotePc.close();
+                            resolve(-1);
+                        }
+                    });
+                });
+                
+            } catch (error) {
+                console.error('WebRTC Frame Size Test error:', error);
+                return -1;
+            }
+        }
+
+        // Individual frame size test functions
+        async function testWebRTCVideoSimulation() {
+            return await testWebRTCFrameSize(8192, 'Low Quality (8KB)');
+        }
+        
+        async function testWebRTCMediumVideo() {
+            return await testWebRTCFrameSize(32768, 'Medium Quality (32KB)');
+        }
+        
+        async function testWebRTCHighVideo() {
+            return await testWebRTCFrameSize(65536, 'High Quality (64KB)');
+        }
         
         function updateBrowserLatency(target, latency) {
             const key = `${target}Browser`;
@@ -650,6 +1199,31 @@ async def index_handler(request):
             
             updateChart();
             updateTable();
+            updateWebRTCInfo();
+        }
+
+        function updateWebRTCInfo() {
+            // Update WebRTC information panel with current measurements
+            const stunGoogle = document.getElementById('stun-google-browser').textContent;
+            const stunCloudflare = document.getElementById('stun-cloudflare-browser').textContent;
+            const webrtcEcho = document.getElementById('webrtc-robot-echo').textContent;
+            const webrtcVideo = document.getElementById('webrtc-video-sim').textContent;
+            const robotRtt = document.getElementById('robot-rtt').textContent;
+            
+            // Show best STUN latency
+            let bestStun = '--';
+            if (stunGoogle !== '--' && stunGoogle !== 'ERR' && stunCloudflare !== '--' && stunCloudflare !== 'ERR') {
+                bestStun = Math.min(parseInt(stunGoogle), parseInt(stunCloudflare)).toString();
+            } else if (stunGoogle !== '--' && stunGoogle !== 'ERR') {
+                bestStun = stunGoogle;
+            } else if (stunCloudflare !== '--' && stunCloudflare !== 'ERR') {
+                bestStun = stunCloudflare;
+            }
+            
+            document.getElementById('webrtc-info-stun').textContent = bestStun;
+            document.getElementById('webrtc-info-local').textContent = webrtcEcho;
+            document.getElementById('webrtc-info-video').textContent = webrtcVideo;
+            document.getElementById('webrtc-info-websocket').textContent = robotRtt;
         }
         
         function updateChart() {
@@ -771,8 +1345,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--web-port",
         type=int,
-        default=8080,
-        help="Web server port (default: 8080)",
+        default=8081,
+        help="Web server port (default: 8081)",
     )
 
     args = parser.parse_args()
