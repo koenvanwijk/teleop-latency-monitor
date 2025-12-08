@@ -346,19 +346,19 @@ async def index_handler(request):
             <div class="stat-card">
                 <div class="stat-label">WebRTC 8KB Frame</div>
                 <div id="webrtc-8kb" class="stat-value" style="color: #e83e8c;">--</div>
-                <div class="stat-label">ms RTT (WebRTC)</div>
+                <div class="stat-label">ms Age (One-way)</div>
                 <div class="stat-label" style="font-size: 0.7em; color: #888;">Low quality video</div>
             </div>
             <div class="stat-card">
                 <div class="stat-label">WebRTC 32KB Frame</div>
                 <div id="webrtc-32kb" class="stat-value" style="color: #dc3545;">--</div>
-                <div class="stat-label">ms RTT (WebRTC)</div>
+                <div class="stat-label">ms Age (One-way)</div>
                 <div class="stat-label" style="font-size: 0.7em; color: #888;">Medium quality video</div>
             </div>
             <div class="stat-card">
                 <div class="stat-label">WebRTC 64KB Frame</div>
                 <div id="webrtc-64kb" class="stat-value" style="color: #6f42c1;">--</div>
-                <div class="stat-label">ms RTT (WebRTC)</div>
+                <div class="stat-label">ms Age (One-way)</div>
                 <div class="stat-label" style="font-size: 0.7em; color: #888;">High quality video</div>
             </div>
         </div>
@@ -450,12 +450,13 @@ async def index_handler(request):
                 </div>
 
                 <div style="margin-top: 10px;">
-                    <strong style="color: #e83e8c;">🤖 WebRTC Teleoperation Simulation (realistic):</strong>
+                    <strong style="color: #e83e8c;">🤖 WebRTC Frame Age Testing (realistic teleoperation):</strong>
                     <div style="margin-left: 20px; margin-top: 5px;">
-                        • <strong>Robot → Browser:</strong> Large video frames (4KB-16KB at 30fps)<br>
-                        • <strong>Browser → Robot:</strong> Small control commands (10-50 bytes)<br>
-                        • <strong>Asymmetric Traffic:</strong> Heavy downstream, light upstream<br>
-                        • <strong>Realistic Latency:</strong> Actual teleoperation communication pattern
+                        • <strong>Timestamped Frames:</strong> Each frame includes send timestamp<br>
+                        • <strong>Frame Age Measurement:</strong> How old is the video data when received<br>
+                        • <strong>Multiple Qualities:</strong> 8KB (low), 32KB (medium), 64KB (high)<br>
+                        • <strong>One-way Latency:</strong> Most relevant for teleoperation video streams<br>
+                        • <strong>Realistic Payloads:</strong> Simulates actual video frame sizes
                     </div>
                 </div>
             </div>
@@ -1046,12 +1047,27 @@ async def index_handler(request):
                         }
                     }, 5000);
                     
-                    // Remote peer echoes frames back
+                    // Remote peer echoes frames back (simulates robot processing)
                     remotePc.ondatachannel = (event) => {
                         const remoteChannel = event.channel;
+                        remoteChannel.onopen = () => {
+                            console.log(`${label} remote channel ready`);
+                        };
+                        
                         remoteChannel.onmessage = (e) => {
                             if (e.data instanceof ArrayBuffer) {
                                 try {
+                                    // Extract timestamp to show frame age at "robot" side
+                                    const frameView = new Uint8Array(e.data);
+                                    const timestampBuffer = frameView.slice(0, 8).buffer;
+                                    const timestampArray = new Float64Array(timestampBuffer);
+                                    const originalTimestamp = timestampArray[0];
+                                    const robotReceiveTime = performance.now();
+                                    const frameAgeAtRobot = robotReceiveTime - originalTimestamp;
+                                    
+                                    console.log(`${label} robot received frame (age: ${frameAgeAtRobot.toFixed(1)}ms)`);
+                                    
+                                    // Echo frame back immediately (simulate robot response)
                                     remoteChannel.send(e.data);
                                 } catch (error) {
                                     console.warn(`${label} remote send error:`, error);
@@ -1060,10 +1076,29 @@ async def index_handler(request):
                         };
                     };
                     
-                    // Local peer sends frame and measures RTT
+                    // Local peer sends frame with timestamp and measures RTT
                     dataChannel.onopen = () => {
                         console.log(`Testing ${label} frame (${frameSize} bytes)`);
+                        
+                        // Create frame with timestamp header
+                        const timestamp = performance.now();
+                        const timestampBytes = new Float64Array([timestamp]);
+                        const timestampBuffer = timestampBytes.buffer;
+                        
+                        // Create full frame: timestamp (8 bytes) + padding
                         const frame = new ArrayBuffer(frameSize);
+                        const frameView = new Uint8Array(frame);
+                        const timestampView = new Uint8Array(timestampBuffer);
+                        
+                        // Copy timestamp to beginning of frame
+                        frameView.set(timestampView, 0);
+                        
+                        // Fill rest with pattern (optional - simulates video data)
+                        for (let i = 8; i < frameSize; i++) {
+                            frameView[i] = i % 256;
+                        }
+                        
+                        console.log(`Sending ${label} frame at ${timestamp.toFixed(3)}ms`);
                         dataChannel.send(frame);
                     };
                     
@@ -1071,12 +1106,28 @@ async def index_handler(request):
                         if (e.data instanceof ArrayBuffer && !resolved) {
                             resolved = true;
                             clearTimeout(timeout);
-                            const end = performance.now();
-                            const frameRTT = end - start;
-                            console.log(`${label} frame RTT: ${Math.round(frameRTT)}ms`);
+                            const receiveTime = performance.now();
+                            
+                            // Extract timestamp from received frame
+                            const frameView = new Uint8Array(e.data);
+                            const timestampBuffer = frameView.slice(0, 8).buffer;
+                            const timestampArray = new Float64Array(timestampBuffer);
+                            const originalTimestamp = timestampArray[0];
+                            
+                            // Calculate frame age (one-way latency) and RTT
+                            const frameAge = receiveTime - originalTimestamp;
+                            const frameRTT = receiveTime - start;
+                            
+                            console.log(`${label} frame received:
+  - Frame age: ${frameAge.toFixed(1)}ms (actual video latency)
+  - Round trip: ${frameRTT.toFixed(1)}ms (ping + processing)
+  - Frame size: ${e.data.byteLength} bytes`);
+                            
                             localPc.close();
                             remotePc.close();
-                            resolve(frameRTT);
+                            
+                            // Return the frame age (more relevant for teleoperation)
+                            resolve(frameAge);
                         }
                     };
                     
@@ -1207,7 +1258,7 @@ async def index_handler(request):
             const stunGoogle = document.getElementById('stun-google-browser').textContent;
             const stunCloudflare = document.getElementById('stun-cloudflare-browser').textContent;
             const webrtcEcho = document.getElementById('webrtc-robot-echo').textContent;
-            const webrtcVideo = document.getElementById('webrtc-video-sim').textContent;
+            const webrtc8kb = document.getElementById('webrtc-8kb').textContent;
             const robotRtt = document.getElementById('robot-rtt').textContent;
             
             // Show best STUN latency
@@ -1220,10 +1271,16 @@ async def index_handler(request):
                 bestStun = stunCloudflare;
             }
             
-            document.getElementById('webrtc-info-stun').textContent = bestStun;
-            document.getElementById('webrtc-info-local').textContent = webrtcEcho;
-            document.getElementById('webrtc-info-video').textContent = webrtcVideo;
-            document.getElementById('webrtc-info-websocket').textContent = robotRtt;
+            // Update WebRTC info elements (check if they exist first)
+            const stunInfoEl = document.getElementById('webrtc-info-stun');
+            const localInfoEl = document.getElementById('webrtc-info-local');
+            const videoInfoEl = document.getElementById('webrtc-info-video');
+            const websocketInfoEl = document.getElementById('webrtc-info-websocket');
+            
+            if (stunInfoEl) stunInfoEl.textContent = bestStun;
+            if (localInfoEl) localInfoEl.textContent = webrtcEcho;
+            if (videoInfoEl) videoInfoEl.textContent = webrtc8kb;
+            if (websocketInfoEl) websocketInfoEl.textContent = robotRtt;
         }
         
         function updateChart() {
