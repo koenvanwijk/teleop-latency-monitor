@@ -11,6 +11,42 @@ import websockets
 # Store active browser connections
 browser_connections = set()
 
+def log(msg: str) -> None:
+    now = time.strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{now}] {msg}")
+
+async def handle_robot_connection(websocket):
+    """Handle WebSocket connection from browser for robot communication"""
+    log(f"Robot client connected: {websocket.remote_address}")
+    try:
+        async for message in websocket:
+            try:
+                data = json.loads(message)
+            except json.JSONDecodeError:
+                log(f"Received non-JSON message: {message!r}")
+                continue
+
+            msg_type = data.get("type")
+            if msg_type == "ping":
+                t0 = data.get("t0")
+                ping_id = data.get("id")  # Get ping ID if present
+                t1 = time.time()
+                response = {
+                    "type": "pong",
+                    "t0": t0,
+                    "t1": t1,
+                }
+                # Include ping ID in response if it was provided
+                if ping_id:
+                    response["id"] = ping_id
+                await websocket.send(json.dumps(response))
+            else:
+                log(f"Received unknown message type: {msg_type}")
+    except websockets.ConnectionClosed:
+        log("Robot client disconnected")
+    except Exception as exc:
+        log(f"Error in robot connection handler: {exc}")
+
 async def ping_server(hostname):
     """Ping a server from the backend and return latency + IP"""
     import subprocess
@@ -248,7 +284,7 @@ async def index_handler(request):
     <div class="container">
         <div class="header">
             <h1>Teleop Latency Monitor</h1>
-            <p>Measuring latency from your browser to the robot server</p>
+            <p>Integrated web interface with built-in robot server</p>
             <p style="font-size: 0.9em; color: #666; margin-bottom: 10px;">
                 <strong>Note:</strong> Browser measurements use HTTP requests (DNS+TCP+HTTP overhead), 
                 while Server measurements use direct ICMP ping packets. This explains the difference in latency.
@@ -264,12 +300,150 @@ async def index_handler(request):
             <div id="status" class="status disconnected">Connecting...</div>
         </div>
         
+        <!-- Network Topology Diagram -->
+        <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 30px; border-radius: 15px; margin-bottom: 30px; position: relative; min-height: 500px;">
+            <h2 style="color: white; text-align: center; margin-bottom: 30px;">🌐 Network Topology & Latency</h2>
+            
+            <!-- Geographic Servers & STUN (Top) -->
+            <div style="display: flex; justify-content: space-around; margin-bottom: 50px;">
+                <!-- Eindhoven -->
+                <div style="text-align: center; position: relative;">
+                    <div style="background: #6f42c1; color: white; padding: 15px 20px; border-radius: 50%; display: inline-block; font-weight: bold; min-width: 80px;">
+                        🇳🇱<br>Eindhoven
+                    </div>
+                    <div style="margin-top: 10px; color: white;">
+                        <div>Browser: <span id="topo-eindhoven-browser" style="font-weight: bold;">--</span>ms</div>
+                        <div>Server: <span id="topo-eindhoven-server" style="font-weight: bold;">--</span>ms</div>
+                    </div>
+                </div>
+                
+                <!-- Amsterdam -->
+                <div style="text-align: center; position: relative;">
+                    <div style="background: #28a745; color: white; padding: 15px 20px; border-radius: 50%; display: inline-block; font-weight: bold; min-width: 80px;">
+                        🇳🇱<br>Amsterdam
+                    </div>
+                    <div style="margin-top: 10px; color: white;">
+                        <div>Browser: <span id="topo-amsterdam-browser" style="font-weight: bold;">--</span>ms</div>
+                        <div>Server: <span id="topo-amsterdam-server" style="font-weight: bold;">--</span>ms</div>
+                    </div>
+                </div>
+                
+                <!-- Sofia -->
+                <div style="text-align: center; position: relative;">
+                    <div style="background: #dc3545; color: white; padding: 15px 20px; border-radius: 50%; display: inline-block; font-weight: bold; min-width: 80px;">
+                        🇧🇬<br>Sofia
+                    </div>
+                    <div style="margin-top: 10px; color: white;">
+                        <div>Browser: <span id="topo-sofia-browser" style="font-weight: bold;">--</span>ms</div>
+                        <div>Server: <span id="topo-sofia-server" style="font-weight: bold;">--</span>ms</div>
+                    </div>
+                </div>
+                
+                <!-- Google STUN -->
+                <div style="text-align: center; position: relative;">
+                    <div style="background: #17a2b8; color: white; padding: 15px 20px; border-radius: 50%; display: inline-block; font-weight: bold; min-width: 80px;">
+                        🌐<br>Google STUN
+                    </div>
+                    <div style="margin-top: 10px; color: white;">
+                        <div>Browser: <span id="topo-stun-google" style="font-weight: bold;">--</span>ms</div>
+                        <div style="font-size: 0.8em; opacity: 0.8;">stun.l.google.com</div>
+                    </div>
+                </div>
+                
+                <!-- Cloudflare STUN -->
+                <div style="text-align: center; position: relative;">
+                    <div style="background: #fd7e14; color: white; padding: 15px 20px; border-radius: 50%; display: inline-block; font-weight: bold; min-width: 80px;">
+                        ☁️<br>Cloudflare STUN
+                    </div>
+                    <div style="margin-top: 10px; color: white;">
+                        <div>Browser: <span id="topo-stun-cloudflare" style="font-weight: bold;">--</span>ms</div>
+                        <div style="font-size: 0.8em; opacity: 0.8;">stun.cloudflare.com</div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Main Connection (Bottom) -->
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 50px;">
+                <!-- Your Computer -->
+                <div style="text-align: center; position: relative;">
+                    <div style="background: #007bff; color: white; padding: 20px 30px; border-radius: 15px; font-weight: bold; box-shadow: 0 4px 15px rgba(0,0,0,0.2);">
+                        💻<br>Your Computer<br>
+                        <small style="opacity: 0.8;"><span id="topo-client-ip">--</span></small>
+                    </div>
+                </div>
+                
+                <!-- Connection Line -->
+                <div style="flex: 1; text-align: center; position: relative; margin: 0 30px;">
+                    <div style="height: 4px; background: linear-gradient(90deg, #007bff, #e83e8c); border-radius: 2px; position: relative;">
+                        <div style="position: absolute; top: -30px; left: 50%; transform: translateX(-50%); background: rgba(255,255,255,0.9); padding: 8px 15px; border-radius: 20px; font-weight: bold; color: #333;">
+                            <span id="topo-robot-rtt" style="color: #007bff;">--</span>ms
+                        </div>
+                        <div style="position: absolute; bottom: -40px; left: 50%; transform: translateX(-50%); color: white; font-size: 0.9em; text-align: center;">
+                            WebSocket<br>Connection
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Robot Server -->
+                <div style="text-align: center; position: relative;">
+                    <div style="background: #e83e8c; color: white; padding: 20px 30px; border-radius: 15px; font-weight: bold; box-shadow: 0 4px 15px rgba(0,0,0,0.2);">
+                        🤖<br>Robot Server<br>
+                        <small style="opacity: 0.8;"><span id="topo-robot-ip">localhost:8765</span></small>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- WebRTC Performance Tests (Bottom) -->
+            <div style="margin-top: 40px; text-align: center;">
+                <h3 style="color: white; margin-bottom: 20px;">🎮 WebRTC Teleoperation Performance</h3>
+                <div style="display: flex; justify-content: center; gap: 30px;">
+                    <!-- Small Packets -->
+                    <div style="background: rgba(255,255,255,0.1); padding: 15px 20px; border-radius: 10px; border: 2px solid rgba(255,255,255,0.2);">
+                        <div style="color: white; font-weight: bold; margin-bottom: 5px;">Small Packets</div>
+                        <div style="font-size: 1.5em; font-weight: bold; color: #00d4aa;"><span id="topo-webrtc-small">--</span>ms</div>
+                        <div style="font-size: 0.8em; color: rgba(255,255,255,0.8);">ping/pong</div>
+                    </div>
+                    
+                    <!-- 8KB Stream -->
+                    <div style="background: rgba(255,255,255,0.1); padding: 15px 20px; border-radius: 10px; border: 2px solid rgba(255,255,255,0.2);">
+                        <div style="color: white; font-weight: bold; margin-bottom: 5px;">8KB Stream</div>
+                        <div style="font-size: 1.5em; font-weight: bold; color: #e83e8c;"><span id="topo-webrtc-8kb">--</span>ms</div>
+                        <div style="font-size: 0.8em; color: rgba(255,255,255,0.8);">low quality</div>
+                    </div>
+                    
+                    <!-- 32KB Stream -->
+                    <div style="background: rgba(255,255,255,0.1); padding: 15px 20px; border-radius: 10px; border: 2px solid rgba(255,255,255,0.2);">
+                        <div style="color: white; font-weight: bold; margin-bottom: 5px;">32KB Stream</div>
+                        <div style="font-size: 1.5em; font-weight: bold; color: #dc3545;"><span id="topo-webrtc-32kb">--</span>ms</div>
+                        <div style="font-size: 0.8em; color: rgba(255,255,255,0.8);">medium quality</div>
+                    </div>
+                    
+                    <!-- 64KB Stream -->
+                    <div style="background: rgba(255,255,255,0.1); padding: 15px 20px; border-radius: 10px; border: 2px solid rgba(255,255,255,0.2);">
+                        <div style="color: white; font-weight: bold; margin-bottom: 5px;">64KB Stream</div>
+                        <div style="font-size: 1.5em; font-weight: bold; color: #6f42c1;"><span id="topo-webrtc-64kb">--</span>ms</div>
+                        <div style="font-size: 0.8em; color: rgba(255,255,255,0.8);">high quality</div>
+                    </div>
+                </div>
+                <div style="margin-top: 15px; color: rgba(255,255,255,0.8); font-size: 0.9em;">
+                    30fps video stream latency • Frame age measurements
+                </div>
+            </div>
+            
+            <!-- Connection Status -->
+            <div style="position: absolute; top: 20px; right: 20px;">
+                <div id="topo-status" class="status disconnected" style="background: rgba(255,255,255,0.9); color: #721c24; padding: 8px 15px; border-radius: 20px; font-size: 0.9em;">
+                    Connecting...
+                </div>
+            </div>
+        </div>
+
         <div class="stats-grid">
             <div class="stat-card">
                 <div class="stat-label">Robot Server</div>
                 <div id="robot-rtt" class="stat-value rtt">--</div>
                 <div class="stat-label">ms RTT (WebSocket)</div>
-                <div class="stat-label" style="font-size: 0.7em; color: #888;" id="robot-ip">localhost:8765</div>
+                <div class="stat-label" style="font-size: 0.7em; color: #888;" id="robot-ip">integrated:8765</div>
             </div>
             <div class="stat-card">
                 <div class="stat-label">Eindhoven (Browser)</div>
@@ -612,6 +786,7 @@ async def index_handler(request):
             robotWs.onopen = function() {
                 document.getElementById('status').textContent = 'Connected to Robot';
                 document.getElementById('status').className = 'status connected';
+                updateTopologyDisplay();
                 
                 // Get server information
                 fetch('/api/server-info')
@@ -687,6 +862,7 @@ async def index_handler(request):
                     } else {
                         document.getElementById('stun-google-browser').textContent = 'ERR';
                     }
+                    updateTopologyDisplay();
                     updateWebRTCInfo();
                     
                     // Server STUN to Google
@@ -701,6 +877,7 @@ async def index_handler(request):
                     } else {
                         document.getElementById('stun-cloudflare-browser').textContent = 'ERR';
                     }
+                    updateTopologyDisplay();
                     updateWebRTCInfo();
                     
                     // Server STUN to Cloudflare
@@ -715,6 +892,7 @@ async def index_handler(request):
                     } else {
                         document.getElementById('webrtc-robot-echo').textContent = 'ERR';
                     }
+                    updateTopologyDisplay();
                     updateWebRTCInfo();
                 }, 3000);
                 
@@ -727,6 +905,7 @@ async def index_handler(request):
                     } else {
                         document.getElementById('webrtc-8kb').textContent = 'ERR';
                     }
+                    updateTopologyDisplay();
                 }, 3500);
                 
                 setTimeout(async () => {
@@ -737,6 +916,7 @@ async def index_handler(request):
                     } else {
                         document.getElementById('webrtc-32kb').textContent = 'ERR';
                     }
+                    updateTopologyDisplay();
                 }, 7000); // 3.5 seconds after first test
                 
                 setTimeout(async () => {
@@ -747,6 +927,7 @@ async def index_handler(request):
                     } else {
                         document.getElementById('webrtc-64kb').textContent = 'ERR';
                     }
+                    updateTopologyDisplay();
                 }, 10500); // 3.5 seconds after second test
             }, 15000); // Every 15 seconds (30fps streams take ~3 seconds each)
         }
@@ -1259,6 +1440,9 @@ async def index_handler(request):
             // Update display
             document.getElementById(`${target}-browser`).textContent = latency.toFixed(1);
             
+            // Update topology display
+            updateTopologyDisplay();
+            
             // Update IP address for browser ping (show hostname since we can't resolve IP in browser)
             const hostname = pingTargets[target];
             ipAddresses[key] = hostname;
@@ -1280,6 +1464,7 @@ async def index_handler(request):
             
             // Update display
             document.getElementById(`${target}-server`).textContent = latency.toFixed(1);
+            updateTopologyDisplay();
             updateChart();
         }
 
@@ -1290,6 +1475,9 @@ async def index_handler(request):
                 `${data.uplink_ms}/${data.downlink_ms}` : '--';
             document.getElementById('robot-updown').textContent = updownText;
             
+            // Update topology display
+            updateTopologyDisplay();
+            
             // Add to robot measurements array
             measurements.robot.push(data);
             if (measurements.robot.length > 50) {
@@ -1299,6 +1487,45 @@ async def index_handler(request):
             updateChart();
             updateTable();
             updateWebRTCInfo();
+        }
+        
+        function updateTopologyDisplay() {
+            // Update topology diagram with current values
+            document.getElementById('topo-robot-rtt').textContent = document.getElementById('robot-rtt').textContent;
+            document.getElementById('topo-client-ip').textContent = document.getElementById('client-ip').textContent;
+            
+            // Geographic servers
+            document.getElementById('topo-eindhoven-browser').textContent = document.getElementById('eindhoven-browser').textContent;
+            document.getElementById('topo-eindhoven-server').textContent = document.getElementById('eindhoven-server').textContent;
+            document.getElementById('topo-amsterdam-browser').textContent = document.getElementById('amsterdam-browser').textContent;
+            document.getElementById('topo-amsterdam-server').textContent = document.getElementById('amsterdam-server').textContent;
+            document.getElementById('topo-sofia-browser').textContent = document.getElementById('sofia-browser').textContent;
+            document.getElementById('topo-sofia-server').textContent = document.getElementById('sofia-server').textContent;
+            
+            // WebRTC tests
+            document.getElementById('topo-webrtc-small').textContent = document.getElementById('webrtc-robot-echo').textContent;
+            document.getElementById('topo-webrtc-8kb').textContent = document.getElementById('webrtc-8kb').textContent;
+            document.getElementById('topo-webrtc-32kb').textContent = document.getElementById('webrtc-32kb').textContent;
+            document.getElementById('topo-webrtc-64kb').textContent = document.getElementById('webrtc-64kb').textContent;
+            
+            // STUN tests
+            document.getElementById('topo-stun-google').textContent = document.getElementById('stun-google-browser').textContent;
+            document.getElementById('topo-stun-cloudflare').textContent = document.getElementById('stun-cloudflare-browser').textContent;
+            
+            // Status
+            const statusEl = document.getElementById('status');
+            const topoStatusEl = document.getElementById('topo-status');
+            if (statusEl && topoStatusEl) {
+                topoStatusEl.textContent = statusEl.textContent;
+                topoStatusEl.className = statusEl.className;
+                if (statusEl.classList.contains('connected')) {
+                    topoStatusEl.style.background = 'rgba(212, 237, 218, 0.9)';
+                    topoStatusEl.style.color = '#155724';
+                } else {
+                    topoStatusEl.style.background = 'rgba(248, 215, 218, 0.9)';
+                    topoStatusEl.style.color = '#721c24';
+                }
+            }
         }
 
         function updateWebRTCInfo() {
@@ -1418,8 +1645,8 @@ async def server_info_handler(request):
     except Exception as e:
         return web.json_response({'error': str(e)}, status=500)
 
-async def main(web_port: int):
-    """Simple web server to serve the latency monitor interface"""
+async def main(web_port: int, robot_port: int):
+    """Simple web server and integrated robot WebSocket server"""
     app = web.Application()
     app.router.add_get('/', index_handler)
     app.router.add_get('/ws-robot', websocket_proxy_handler)
@@ -1432,20 +1659,28 @@ async def main(web_port: int):
     await site.start()
     
     print(f"Web interface available at: http://localhost:{web_port}")
-    print("The web page will measure latency directly from your browser to the robot server")
+    print(f"Robot WebSocket server starting on: ws://localhost:{robot_port}")
+    print("The web page will measure latency directly from the integrated robot server")
+    
+    # Start robot WebSocket server
+    log(f"Starting robot server on 0.0.0.0:{robot_port}")
+    robot_server = await websockets.serve(handle_robot_connection, '0.0.0.0', robot_port)
+    log("Robot server is running. Waiting for connections...")
     
     # Keep running
     try:
         while True:
             await asyncio.sleep(3600)  # Sleep for an hour
     except KeyboardInterrupt:
-        print("Web server stopped")
+        print("Servers stopped")
+        robot_server.close()
+        await robot_server.wait_closed()
 
 if __name__ == "__main__":
     import asyncio
     
     parser = argparse.ArgumentParser(
-        description="Simple web interface for latency monitoring"
+        description="Integrated web interface and robot server for latency monitoring"
     )
     parser.add_argument(
         "--web-port",
@@ -1453,10 +1688,16 @@ if __name__ == "__main__":
         default=8081,
         help="Web server port (default: 8081)",
     )
+    parser.add_argument(
+        "--robot-port",
+        type=int,
+        default=8765,
+        help="Robot WebSocket server port (default: 8765)",
+    )
 
     args = parser.parse_args()
 
     try:
-        asyncio.run(main(args.web_port))
+        asyncio.run(main(args.web_port, args.robot_port))
     except KeyboardInterrupt:
-        print("Web server stopped by user")
+        print("Servers stopped by user")
