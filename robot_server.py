@@ -24,12 +24,16 @@ async def handle_connection(websocket: websockets.WebSocketServerProtocol):
             msg_type = data.get("type")
             if msg_type == "ping":
                 t0 = data.get("t0")
+                ping_id = data.get("id")  # Get ping ID if present
                 t1 = time.time()
                 response = {
                     "type": "pong",
                     "t0": t0,
                     "t1": t1,
                 }
+                # Include ping ID in response if it was provided
+                if ping_id:
+                    response["id"] = ping_id
                 await websocket.send(json.dumps(response))
             else:
                 log(f"Received unknown message type: {msg_type}")
