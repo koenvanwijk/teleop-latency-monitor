@@ -124,8 +124,9 @@ async def websocket_proxy_handler(request):
     browser_connections.add(ws_browser)
     
     try:
-        # Connect to robot server
-        async with websockets.connect('ws://localhost:8765') as ws_robot:
+        # Connect to robot server (use configured port)
+        robot_port = request.app.get('robot_port', 8765)
+        async with websockets.connect(f'ws://localhost:{robot_port}') as ws_robot:
             # Handle messages in both directions
             async def browser_to_robot():
                 async for msg in ws_browser:
@@ -405,7 +406,7 @@ async def index_handler(request):
                 <div style="text-align: center; position: relative;">
                     <div style="background: #e83e8c; color: white; padding: 20px 30px; border-radius: 15px; font-weight: bold; box-shadow: 0 4px 15px rgba(0,0,0,0.2);">
                         🤖<br>Robot Server<br>
-                        <small style="opacity: 0.8;"><span id="topo-robot-ip">localhost:8765</span></small>
+                        <small style="opacity: 0.8;"><span id="topo-robot-ip">--</span></small>
                     </div>
                 </div>
             </div>
@@ -810,6 +811,11 @@ async def index_handler(request):
                         
                         document.getElementById('client-ip').textContent = clientIp;
                         document.getElementById('robot-server-ip').textContent = serverInfo;
+                        // Also update topology robot server label if present
+                        const topoRobotIpEl = document.getElementById('topo-robot-ip');
+                        if (topoRobotIpEl && data.robot_server) {
+                            topoRobotIpEl.textContent = data.robot_server;
+                        }
                     })
                     .catch(error => console.error('Error getting server info:', error));
                 
@@ -1653,11 +1659,12 @@ async def server_info_handler(request):
         except:
             external_ip = None
             
+        robot_port = request.app.get('robot_port', 8765)
         info = {
             'server_hostname': hostname,
             'server_local_ip': local_ip,
             'server_external_ip': external_ip,
-            'robot_server': 'localhost:8765',
+            'robot_server': f'localhost:{robot_port}',
             'client_ip': request.remote  # Client's IP as seen by server
         }
         
@@ -1668,6 +1675,8 @@ async def server_info_handler(request):
 async def main(web_port: int, robot_port: int):
     """Simple web server and integrated robot WebSocket server"""
     app = web.Application()
+    # Store robot port in app for handlers
+    app['robot_port'] = robot_port
     app.router.add_get('/', index_handler)
     app.router.add_get('/ws-robot', websocket_proxy_handler)
     app.router.add_get('/api/server-info', server_info_handler)
