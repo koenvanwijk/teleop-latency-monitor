@@ -380,9 +380,17 @@ async def index_handler(request):
                 <!-- Connection Line -->
                 <div style="flex: 1; text-align: center; position: relative; margin: 0 30px;">
                     <div style="height: 4px; background: linear-gradient(90deg, #007bff, #e83e8c); border-radius: 2px; position: relative;">
-                        <div style="position: absolute; top: -30px; left: 50%; transform: translateX(-50%); background: rgba(255,255,255,0.9); padding: 8px 15px; border-radius: 20px; font-weight: bold; color: #333;">
-                            <span id="topo-webrtc-small" style="color: #007bff;">--</span>ms</br>
-                            <span id="topo-robot-rtt" style="color: #007bff;">--</span>ms
+                        <div style="position: absolute; top: -50px; left: 50%; transform: translateX(-50%); background: rgba(255,255,255,0.9); padding: 8px 15px; border-radius: 16px; font-weight: bold; color: #333; line-height: 1.4;">
+                            <div>
+                                WebSocket RTT: <span id="topo-robot-rtt" style="color: #007bff;">--</span>ms
+                            </div>
+                            <div style="font-size: 0.9em;">
+                                ↑ <span id="topo-robot-uplink" style="color: #28a745;">--</span>ms
+                                • ↓ <span id="topo-robot-downlink" style="color: #dc3545;">--</span>ms
+                            </div>
+                            <div style="font-size: 0.9em;">
+                                WebRTC RTT: <span id="topo-webrtc-small" style="color: #007bff;">--</span>ms
+                            </div>
                         </div>
                         <div style="position: absolute; bottom: -60px; left: 50%; transform: translateX(-50%); color: white; font-size: 0.9em; text-align: center;">
                             WebSocket<br>Connection
@@ -1495,6 +1503,13 @@ async def index_handler(request):
         function updateTopologyDisplay() {
             // Update topology diagram with current values
             document.getElementById('topo-robot-rtt').textContent = document.getElementById('robot-rtt').textContent;
+            // Update uplink/downlink in topology if available
+            const updown = document.getElementById('robot-updown').textContent;
+            const [up, down] = (updown && updown.includes('/')) ? updown.split('/') : ['--','--'];
+            const topoUpEl = document.getElementById('topo-robot-uplink');
+            const topoDownEl = document.getElementById('topo-robot-downlink');
+            if (topoUpEl) topoUpEl.textContent = up;
+            if (topoDownEl) topoDownEl.textContent = down;
             document.getElementById('topo-client-ip').textContent = document.getElementById('client-ip').textContent;
             
             // Geographic servers
