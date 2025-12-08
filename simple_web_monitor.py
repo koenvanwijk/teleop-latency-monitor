@@ -398,17 +398,19 @@ async def index_handler(request):
                 </div>
             </div>
             
-            <!-- WebRTC Performance Tests (Bottom) -->
+            <!-- WebRTC Small Packets (Below WebSocket) -->
+            <div style="margin-top: 25px; text-align: center;">
+                <div style="background: rgba(255,255,255,0.1); padding: 15px 20px; border-radius: 10px; border: 2px solid rgba(255,255,255,0.2); display: inline-block;">
+                    <div style="color: white; font-weight: bold; margin-bottom: 5px;">WebRTC Small Packets</div>
+                    <div style="font-size: 1.5em; font-weight: bold; color: #00d4aa;"><span id="topo-webrtc-small">--</span>ms</div>
+                    <div style="font-size: 0.8em; color: rgba(255,255,255,0.8);">ping/pong</div>
+                </div>
+            </div>
+            
+            <!-- WebRTC Video Stream Tests -->
             <div style="margin-top: 40px; text-align: center;">
-                <h3 style="color: white; margin-bottom: 20px;">🎮 WebRTC Teleoperation Performance</h3>
+                <h3 style="color: white; margin-bottom: 20px;">🎥 30fps Video Stream Performance</h3>
                 <div style="display: flex; justify-content: center; gap: 30px;">
-                    <!-- Small Packets -->
-                    <div style="background: rgba(255,255,255,0.1); padding: 15px 20px; border-radius: 10px; border: 2px solid rgba(255,255,255,0.2);">
-                        <div style="color: white; font-weight: bold; margin-bottom: 5px;">Small Packets</div>
-                        <div style="font-size: 1.5em; font-weight: bold; color: #00d4aa;"><span id="topo-webrtc-small">--</span>ms</div>
-                        <div style="font-size: 0.8em; color: rgba(255,255,255,0.8);">ping/pong</div>
-                    </div>
-                    
                     <!-- 8KB Stream -->
                     <div style="background: rgba(255,255,255,0.1); padding: 15px 20px; border-radius: 10px; border: 2px solid rgba(255,255,255,0.2);">
                         <div style="color: white; font-weight: bold; margin-bottom: 5px;">8KB Stream</div>
@@ -431,7 +433,7 @@ async def index_handler(request):
                     </div>
                 </div>
                 <div style="margin-top: 15px; color: rgba(255,255,255,0.8); font-size: 0.9em;">
-                    30fps video stream latency • Frame age measurements
+                    Realistic video frame age measurements • Sustained 30fps streams
                 </div>
             </div>
             
