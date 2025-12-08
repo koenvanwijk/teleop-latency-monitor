@@ -381,10 +381,14 @@ async def index_handler(request):
                 <div style="flex: 1; text-align: center; position: relative; margin: 0 30px;">
                     <div style="height: 4px; background: linear-gradient(90deg, #007bff, #e83e8c); border-radius: 2px; position: relative;">
                         <div style="position: absolute; top: -30px; left: 50%; transform: translateX(-50%); background: rgba(255,255,255,0.9); padding: 8px 15px; border-radius: 20px; font-weight: bold; color: #333;">
+                            <span id="topo-webrtc-small" style="color: #007bff;">--</span>ms</br>
                             <span id="topo-robot-rtt" style="color: #007bff;">--</span>ms
                         </div>
-                        <div style="position: absolute; bottom: -40px; left: 50%; transform: translateX(-50%); color: white; font-size: 0.9em; text-align: center;">
+                        <div style="position: absolute; bottom: -60px; left: 50%; transform: translateX(-50%); color: white; font-size: 0.9em; text-align: center;">
                             WebSocket<br>Connection
+                        </div>
+                        <div style="position: absolute; bottom: 40px; left: 50%; transform: translateX(-50%); color: white; font-size: 0.9em; text-align: center;">
+                            WebRTC<br>Connection
                         </div>
                     </div>
                 </div>
@@ -398,14 +402,6 @@ async def index_handler(request):
                 </div>
             </div>
             
-            <!-- WebRTC Small Packets (Below WebSocket) -->
-            <div style="margin-top: 25px; text-align: center;">
-                <div style="background: rgba(255,255,255,0.1); padding: 15px 20px; border-radius: 10px; border: 2px solid rgba(255,255,255,0.2); display: inline-block;">
-                    <div style="color: white; font-weight: bold; margin-bottom: 5px;">WebRTC Small Packets</div>
-                    <div style="font-size: 1.5em; font-weight: bold; color: #00d4aa;"><span id="topo-webrtc-small">--</span>ms</div>
-                    <div style="font-size: 0.8em; color: rgba(255,255,255,0.8);">ping/pong</div>
-                </div>
-            </div>
             
             <!-- WebRTC Video Stream Tests -->
             <div style="margin-top: 40px; text-align: center;">
