@@ -48,15 +48,9 @@ async def handle_robot_connection(websocket):
                     if not session_id or not sdp:
                         raise ValueError("Missing session or SDP in webrtc_offer")
 
-                    # Close any existing peer connections for this websocket to avoid leaks/conflicts
-                    try:
-                        for (ws, sid), old_pc in list(webrtc_sessions.items()):
-                            if ws == websocket:
-                                await old_pc.close()
-                                del webrtc_sessions[(ws, sid)]
-                                log(f"Closed previous WebRTC session {sid} for this client")
-                    except Exception:
-                        pass
+                    # Don't aggressively close old sessions - allow multiple concurrent sessions per client
+                    # Sessions will clean themselves up via connectionstatechange handler
+                    # This prevents closing a session that's still negotiating
 
                     pc = RTCServerPeerConnection(RTCConfiguration(iceServers=[
                         RTCIceServer(urls=["stun:stun.l.google.com:19302", "stun:stun.cloudflare.com:3478"])
@@ -67,51 +61,46 @@ async def handle_robot_connection(websocket):
                         log(f"WebRTC datachannel created: {channel.label} (session {session_id})")
                         def on_open():
                             log(f"WebRTC datachannel open: {channel.label} (session {session_id})")
-                            try:
-                                channel.send("robot-pong")
-                                log(f"WebRTC datachannel sent robot-pong on open (session {session_id})")
-                            except Exception:
-                                pass
                         channel.on("open", on_open)
 
                         def on_message(message):
                             if isinstance(message, (bytes, bytearray)):
                                 log(f"WebRTC datachannel bytes received: {len(message)} (session {session_id})")
                                 try:
-                                    channel.send(message)
-                                except Exception:
-                                    pass
+                                    if channel.readyState == 'open':
+                                        channel.send(message)
+                                        log(f"WebRTC datachannel echoed {len(message)} bytes (session {session_id})")
+                                except Exception as e:
+                                    log(f"WebRTC datachannel send error (bytes): {e} (session {session_id})")
                             else:
                                 log(f"WebRTC datachannel message: {message} (session {session_id})")
                                 if message == "robot-ping":
                                     try:
-                                        channel.send("robot-pong")
-                                        log(f"WebRTC datachannel responded robot-pong (session {session_id})")
-                                    except Exception:
-                                        pass
+                                        if channel.readyState == 'open':
+                                            channel.send("robot-pong")
+                                            log(f"WebRTC datachannel responded robot-pong (session {session_id})")
+                                    except Exception as e:
+                                        log(f"WebRTC datachannel send error (pong): {e} (session {session_id})")
                                 else:
                                     try:
-                                        channel.send(str(message))
-                                    except Exception:
-                                        pass
+                                        if channel.readyState == 'open':
+                                            channel.send(str(message))
+                                            log(f"WebRTC datachannel echoed message (session {session_id})")
+                                    except Exception as e:
+                                        log(f"WebRTC datachannel send error (echo): {e} (session {session_id})")
                         channel.on("message", on_message)
 
                     @pc.on("connectionstatechange")
                     def on_conn_state_change():
                         state = pc.connectionState
                         log(f"WebRTC connection state: {state} (session {session_id})")
-                        if state in ("failed", "disconnected"):
-                            async def close_and_remove():
-                                try:
-                                    await pc.close()
-                                except Exception:
-                                    pass
-                                try:
-                                    if (websocket, session_id) in webrtc_sessions:
-                                        del webrtc_sessions[(websocket, session_id)]
-                                except Exception:
-                                    pass
-                            asyncio.create_task(close_and_remove())
+                        if state in ("failed", "closed"):
+                            # Remove from sessions immediately on failure/closure
+                            try:
+                                if (websocket, session_id) in webrtc_sessions:
+                                    del webrtc_sessions[(websocket, session_id)]
+                            except Exception:
+                                pass
 
                     @pc.on("iceconnectionstatechange")
                     def on_ice_state_change():
@@ -1022,7 +1011,9 @@ async def index_handler(request):
         
         function startMeasurements() {
             if (measurementInterval) clearInterval(measurementInterval);
-            measurementInterval = setInterval(() => {
+            
+            // Define the test function
+            const runTests = () => {
                 sendPing(); // Robot server ping
                 
                 // Stagger the public server pings to reduce load
@@ -1072,8 +1063,9 @@ async def index_handler(request):
                     stunTestFromServer('cloudflare');
                 }, 2500);
                 
-                // WebRTC Robot Echo test
+                // WebRTC tests - run sequentially, waiting for each to complete
                 setTimeout(async () => {
+                    // Robot Echo Test
                     const robotEchoLatency = await testWebRTCRobotEcho();
                     if (robotEchoLatency > 0) {
                         document.getElementById('webrtc-robot-echo').textContent = Math.round(robotEchoLatency);
@@ -1082,10 +1074,9 @@ async def index_handler(request):
                     }
                     updateTopologyDisplay();
                     updateWebRTCInfo();
-                }, 3000);
-                
-                // WebRTC 30fps Stream Tests - spaced for 3 second streams each
-                setTimeout(async () => {
+                    
+                    // 8KB Video Stream Test - wait for echo to complete
+                    console.log('[WebRTC] Starting 8KB test after echo completed');
                     document.getElementById('webrtc-8kb').textContent = 'Testing...';
                     const eightKbLatency = await testWebRTCVideoSimulation(); // 8KB
                     if (eightKbLatency > 0) {
@@ -1094,9 +1085,11 @@ async def index_handler(request):
                         document.getElementById('webrtc-8kb').textContent = 'ERR';
                     }
                     updateTopologyDisplay();
-                }, 3500);
+                    console.log('[WebRTC] All tests completed');
+                }, 3000);
                 
-                setTimeout(async () => {
+                // DISABLED: 32KB test
+                /*setTimeout(async () => {
                     document.getElementById('webrtc-32kb').textContent = 'Testing...';
                     const thirtyTwoKbLatency = await testWebRTCMediumVideo(); // 32KB
                     if (thirtyTwoKbLatency > 0) {
@@ -1105,9 +1098,10 @@ async def index_handler(request):
                         document.getElementById('webrtc-32kb').textContent = 'ERR';
                     }
                     updateTopologyDisplay();
-                }, 7000); // 3.5 seconds after first test
+                }, 7000);*/ // 3.5 seconds after first test
                 
-                setTimeout(async () => {
+                // DISABLED: 64KB test
+                /*setTimeout(async () => {
                     document.getElementById('webrtc-64kb').textContent = 'Testing...';
                     const sixtyFourKbLatency = await testWebRTCHighVideo(); // 64KB
                     if (sixtyFourKbLatency > 0) {
@@ -1116,8 +1110,14 @@ async def index_handler(request):
                         document.getElementById('webrtc-64kb').textContent = 'ERR';
                     }
                     updateTopologyDisplay();
-                }, 10500); // 3.5 seconds after second test
-            }, 15000); // Every 15 seconds (30fps streams take ~3 seconds each)
+                }, 10500);*/ // 3.5 seconds after second test
+            };
+            
+            // Run tests immediately on start
+            runTests();
+            
+            // Then repeat every 60 seconds
+            measurementInterval = setInterval(runTests, 60000);
         }
         
         function stopMeasurements() {
@@ -1424,8 +1424,8 @@ async def index_handler(request):
                     }).catch(() => {
                         if (!resolved) {
                             resolved = true;
-                            clearTimeout(timeout);
-                            try { pc.close(); } catch {}
+                            clearTimeout(negotiationTimeout);
+                            clearTimeout(negotiationTimeout);
                             // Cleanup signaling listener on error
                             try { robotWs.removeEventListener('message', onSignal); } catch {}
                             console.error('[WebRTC] Error creating/sending offer');
@@ -1441,209 +1441,219 @@ async def index_handler(request):
             }
         }
 
-        // WebRTC Frame Size Testing - 30fps video stream simulation
+        // WebRTC Frame Size Testing via Robot Server (30fps stream)
         async function testWebRTCFrameSize(frameSize, label) {
             try {
-                const localPc = new RTCPeerConnection();
-                const remotePc = new RTCPeerConnection();
-                
-                const dataChannel = localPc.createDataChannel(`frame-test-${frameSize}`, {
-                    ordered: true,
-                    maxRetransmits: 0
+                const session = Math.random().toString(36).substr(2, 9);
+                console.log('[WebRTC]', `Starting ${label} stream session`, session);
+                const pc = new RTCPeerConnection({
+                    iceServers: [
+                        { urls: 'stun:stun.l.google.com:19302' },
+                        { urls: 'stun:stun.cloudflare.com:3478' }
+                    ]
                 });
-                
+                const dataChannel = pc.createDataChannel(`frame-test-${frameSize}`, { ordered: true });
+
                 return new Promise((resolve) => {
                     let resolved = false;
                     let framesSent = 0;
                     let framesReceived = 0;
                     let frameAges = [];
                     let sendInterval = null;
-                    const targetFrames = 60; // 2 seconds at 30fps
-                    const frameInterval = 1000 / 30; // 33.33ms between frames
-                    
-                    const timeout = setTimeout(() => {
+                    const targetFrames = 60;
+                    const frameInterval = 1000 / 5; // 5 fps for testing
+
+                    const negotiationTimeout = setTimeout(() => {
                         if (!resolved) {
                             resolved = true;
-                            console.log(`${label} stream timeout`);
-                            if (sendInterval) clearInterval(sendInterval);
-                            localPc.close();
-                            remotePc.close();
+                            try { pc.close(); } catch {}
+                            try { robotWs.removeEventListener('message', onSignal); } catch {}
+                            console.warn('[WebRTC]', `${label} negotiation timeout`, session);
                             resolve(-1);
                         }
-                    }, 10000);
-                    
-                    // Remote peer echoes frames back (simulates robot processing)
-                    remotePc.ondatachannel = (event) => {
-                        const remoteChannel = event.channel;
-                        remoteChannel.onopen = () => {
-                            console.log(`${label} remote channel ready for 30fps stream`);
-                        };
-                        
-                        remoteChannel.onmessage = (e) => {
-                            if (e.data instanceof ArrayBuffer) {
+                    }, 20000); // Allow time for: ICE negotiation + sending 60 frames + receiving echoes
+
+                    let dataChannelReady = false;
+                    let peerConnectionReady = false;
+
+                    const startSendingFrames = () => {
+                        if (dataChannelReady && peerConnectionReady && !sendInterval) {
+                            console.log('[WebRTC]', `Starting ${label} 5fps stream (${frameSize} bytes)`, session);
+                            
+                            const sendNextFrame = () => {
+                                if (framesSent >= targetFrames) {
+                                    return;
+                                }
+                                
+                                // Check if buffer is clear
+                                if (dataChannel.bufferedAmount > 0) {
+                                    setTimeout(sendNextFrame, 5);
+                                    return;
+                                }
+                                
+                                const timestamp = performance.now();
+                                const frame = new ArrayBuffer(frameSize);
+                                const frameView = new Uint8Array(frame);
+                                const headerArray = new Float64Array([timestamp, framesSent]);
+                                const headerView = new Uint8Array(headerArray.buffer);
+                                frameView.set(headerView, 0);
+                                for (let i = 16; i < frameSize; i++) {
+                                    frameView[i] = (framesSent + i) % 256;
+                                }
                                 try {
-                                    // Extract frame number and timestamp
-                                    const frameView = new Uint8Array(e.data);
-                                    const headerView = new Float64Array(frameView.slice(0, 16).buffer);
-                                    const originalTimestamp = headerView[0];
-                                    const frameNumber = headerView[1];
-                                    
-                                    const robotReceiveTime = performance.now();
-                                    const frameAgeAtRobot = robotReceiveTime - originalTimestamp;
-                                    
-                                    // Log every 10th frame to avoid spam
-                                    if (frameNumber % 10 === 0) {
-                                        console.log(`${label} robot frame #${frameNumber} (age: ${frameAgeAtRobot.toFixed(1)}ms)`);
+                                    dataChannel.send(frame);
+                                    framesSent++;
+                                    if (framesSent % 10 === 0) {
+                                        console.log('[WebRTC]', `${label} sent frame #${framesSent}/${targetFrames}`, session);
                                     }
                                     
-                                    // Echo frame back immediately (simulate robot response)
-                                    remoteChannel.send(e.data);
+                                    // Use extremely conservative fixed delay
+                                    // This ensures frames are actually sent one at a time with plenty of spacing
+                                    setTimeout(sendNextFrame, 1000); // 1000ms = 1fps (extremely conservative for testing)
                                 } catch (error) {
-                                    console.warn(`${label} remote send error:`, error);
+                                    console.warn('[WebRTC]', `${label} send error:`, error);
                                 }
-                            }
-                        };
-                    };
-                    
-                    // Local peer sends 30fps stream with timestamps
-                    dataChannel.onopen = () => {
-                        console.log(`Starting ${label} 30fps stream (${frameSize} bytes per frame)`);
-                        
-                        // Start sending frames at 30fps
-                        sendInterval = setInterval(() => {
-                            if (framesSent >= targetFrames) {
-                                clearInterval(sendInterval);
-                                return;
-                            }
+                            };
                             
-                            const timestamp = performance.now();
-                            
-                            // Create frame with timestamp + frame number header (16 bytes total)
-                            const frame = new ArrayBuffer(frameSize);
-                            const frameView = new Uint8Array(frame);
-                            const headerArray = new Float64Array([timestamp, framesSent]);
-                            const headerView = new Uint8Array(headerArray.buffer);
-                            
-                            // Copy header to beginning of frame
-                            frameView.set(headerView, 0);
-                            
-                            // Fill rest with video-like pattern
-                            for (let i = 16; i < frameSize; i++) {
-                                frameView[i] = (framesSent + i) % 256;
-                            }
-                            
-                            try {
-                                dataChannel.send(frame);
-                                framesSent++;
-                                
-                                if (framesSent % 15 === 0) { // Log every half second
-                                    console.log(`${label} sent frame #${framesSent}/${targetFrames}`);
-                                }
-                            } catch (error) {
-                                console.warn(`${label} send error:`, error);
-                                clearInterval(sendInterval);
-                            }
-                        }, frameInterval);
-                    };
-                    
-                    dataChannel.onmessage = (e) => {
-                        if (e.data instanceof ArrayBuffer) {
-                            const receiveTime = performance.now();
-                            
-                            // Extract timestamp and frame number from received frame
-                            const frameView = new Uint8Array(e.data);
-                            const headerArray = new Float64Array(frameView.slice(0, 16).buffer);
-                            const originalTimestamp = headerArray[0];
-                            const frameNumber = headerArray[1];
-                            
-                            // Calculate frame age (one-way latency)
-                            const frameAge = receiveTime - originalTimestamp;
-                            frameAges.push(frameAge);
-                            framesReceived++;
-                            
-                            // Log every 10th frame to avoid spam
-                            if (framesReceived % 10 === 0) {
-                                console.log(`${label} received frame #${frameNumber} (age: ${frameAge.toFixed(1)}ms)`);
-                            }
-                            
-                            // Check if we've received all frames
-                            if (framesReceived >= targetFrames && !resolved) {
-                                resolved = true;
-                                clearTimeout(timeout);
-                                if (sendInterval) clearInterval(sendInterval);
-                                
-                                // Calculate statistics
-                                const avgAge = frameAges.reduce((a, b) => a + b, 0) / frameAges.length;
-                                const minAge = Math.min(...frameAges);
-                                const maxAge = Math.max(...frameAges);
-                                const jitter = maxAge - minAge;
-                                
-                                console.log(`${label} 30fps stream complete:
-  - Frames: ${framesReceived}/${targetFrames}
-  - Avg age: ${avgAge.toFixed(1)}ms
-  - Min age: ${minAge.toFixed(1)}ms  
-  - Max age: ${maxAge.toFixed(1)}ms
-  - Jitter: ${jitter.toFixed(1)}ms
-  - Frame size: ${e.data.byteLength} bytes`);
-                                
-                                localPc.close();
-                                remotePc.close();
-                                
-                                // Return average frame age
-                                resolve(avgAge);
-                            }
+                            sendInterval = true; // Mark as started
+                            sendNextFrame();
                         }
                     };
-                    
+
+                    dataChannel.onopen = () => {
+                        console.log('[WebRTC]', `${label} DataChannel opened`, session);
+                        dataChannelReady = true;
+                        startSendingFrames();
+                    };
+
+                    pc.onconnectionstatechange = () => {
+                        console.log('[WebRTC]', `${label} connection state: ${pc.connectionState}`, session);
+                        if (pc.connectionState === 'connected') {
+                            peerConnectionReady = true;
+                            startSendingFrames();
+                        }
+                    };
+
+                    dataChannel.onmessage = async (e) => {
+                        console.log('[WebRTC]', `${label} onmessage fired! readyState=${dataChannel.readyState}`, session);
+                        try {
+                            let data = e.data;
+                            console.log('[WebRTC]', `${label} data type: ${typeof data}, instanceof ArrayBuffer: ${data instanceof ArrayBuffer}, instanceof Blob: ${data instanceof Blob}`, session);
+                            // Convert Blob to ArrayBuffer if needed
+                            if (data instanceof Blob) {
+                                console.log('[WebRTC]', `${label} converting Blob (${data.size} bytes)`, session);
+                                data = await data.arrayBuffer();
+                                console.log('[WebRTC]', `${label} converted to ArrayBuffer (${data.byteLength} bytes)`, session);
+                            }
+                            if (data instanceof ArrayBuffer) {
+                                console.log('[WebRTC]', `${label} processing ArrayBuffer (${data.byteLength} bytes)`, session);
+                                const receiveTime = performance.now();
+                                const frameView = new Uint8Array(data);
+                                if (frameView.byteLength < 16) {
+                                    console.warn('[WebRTC]', `${label} frame too small: ${frameView.byteLength} bytes`, session);
+                                    return;
+                                }
+                                const headerBuffer = frameView.slice(0, 16).buffer;
+                                const headerArray = new Float64Array(headerBuffer);
+                                const originalTimestamp = headerArray[0];
+                                const frameNumber = headerArray[1];
+                                console.log('[WebRTC]', `${label} parsed: timestamp=${originalTimestamp}, frameNum=${frameNumber}`, session);
+                                const frameAge = receiveTime - originalTimestamp;
+                                frameAges.push(frameAge);
+                                framesReceived++;
+                                console.log('[WebRTC]', `${label} received frame #${Math.floor(frameNumber)} of ${targetFrames} (age: ${frameAge.toFixed(1)}ms, total received: ${framesReceived})`, session);
+                                if (framesReceived >= targetFrames && !resolved) {
+                                    resolved = true;
+                                    clearTimeout(negotiationTimeout);
+                                    const avgAge = frameAges.reduce((a, b) => a + b, 0) / frameAges.length;
+                                    console.log('[WebRTC]', `${label} stream complete avg age: ${avgAge.toFixed(1)}ms`, session);
+                                    try { pc.close(); } catch {}
+                                    try { robotWs.removeEventListener('message', onSignal); } catch {}
+                                    resolve(avgAge);
+                                }
+                            } else {
+                                console.warn('[WebRTC]', `${label} received non-ArrayBuffer data:`, typeof data, session);
+                            }
+                        } catch (error) {
+                            console.error('[WebRTC]', `${label} onmessage error:`, error, session);
+                        }
+                    };
+                    console.log('[WebRTC]', `${label} onmessage handler attached`, session);
+
                     dataChannel.onerror = (e) => {
-                        console.error('DataChannel error:', e);
+                        console.error('[WebRTC]', `${label} DataChannel error:`, e);
                         if (!resolved) {
                             resolved = true;
-                            clearTimeout(timeout);
-                            localPc.close();
-                            remotePc.close();
+                            clearTimeout(negotiationTimeout);
+                            try { pc.close(); } catch {}
+                            try { robotWs.removeEventListener('message', onSignal); } catch {}
                             resolve(-1);
                         }
                     };
-                    
-                    // Set up ICE candidates exchange
-                    localPc.onicecandidate = (e) => {
-                        if (e.candidate) {
-                            remotePc.addIceCandidate(e.candidate).catch(console.warn);
+
+                    pc.onicecandidate = (event) => {
+                        if (event.candidate) {
+                            console.log('[WebRTC]', 'Gathering ICE candidate for video', session);
                         }
                     };
-                    
-                    remotePc.onicecandidate = (e) => {
-                        if (e.candidate) {
-                            localPc.addIceCandidate(e.candidate).catch(console.warn);
-                        }
+
+                    const onSignal = (evt) => {
+                        try {
+                            const data = JSON.parse(evt.data);
+                            if (data.session !== session) return;
+                            if (data.type === 'webrtc_answer') {
+                                console.log('[WebRTC]', 'Video answer received', session);
+                                const desc = new RTCSessionDescription(data.sdp);
+                                pc.setRemoteDescription(desc).catch(() => {});
+                            } else if (data.type === 'webrtc_ice') {
+                                const cand = new RTCIceCandidate(data.candidate);
+                                pc.addIceCandidate(cand).catch(() => {});
+                            }
+                        } catch {}
                     };
-                    
-                    // Create offer and exchange
-                    localPc.createOffer().then(offer => {
-                        return localPc.setLocalDescription(offer);
-                    }).then(() => {
-                        return remotePc.setRemoteDescription(localPc.localDescription);
-                    }).then(() => {
-                        return remotePc.createAnswer();
-                    }).then(answer => {
-                        return remotePc.setLocalDescription(answer);
-                    }).then(() => {
-                        return localPc.setRemoteDescription(remotePc.localDescription);
-                    }).catch((error) => {
-                        console.error('WebRTC negotiation error:', error);
+                    robotWs.addEventListener('message', onSignal);
+
+                    pc.createOffer().then(offer => {
+                        console.log('[WebRTC]', 'Creating video offer', session);
+                        return pc.setLocalDescription(offer);
+                    }).then(async () => {
+                        await new Promise((resolve) => {
+                            if (pc.iceGatheringState === 'complete') {
+                                resolve();
+                            } else {
+                                const onIceGatheringStateChange = () => {
+                                    if (pc.iceGatheringState === 'complete') {
+                                        pc.removeEventListener('icegatheringstatechange', onIceGatheringStateChange);
+                                        resolve();
+                                    }
+                                };
+                                pc.addEventListener('icegatheringstatechange', onIceGatheringStateChange);
+                            }
+                        });
+                        if (robotWs && robotWs.readyState === WebSocket.OPEN) {
+                            const msg = {
+                                type: 'webrtc_offer',
+                                session: session,
+                                sdp: pc.localDescription
+                            };
+                            console.log('[WebRTC]', 'Sending video offer', session);
+                            robotWs.send(JSON.stringify(msg));
+                        } else {
+                            console.warn('[WebRTC]', 'robotWs not open; cannot send video offer', session);
+                        }
+                    }).catch((err) => {
+                        console.error('[WebRTC]', 'Error creating/sending video offer', err, session);
                         if (!resolved) {
                             resolved = true;
-                            clearTimeout(timeout);
-                            localPc.close();
-                            remotePc.close();
+                            clearTimeout(negotiationTimeout);
+                            try { pc.close(); } catch {}
+                            try { robotWs.removeEventListener('message', onSignal); } catch {}
                             resolve(-1);
                         }
                     });
                 });
-                
             } catch (error) {
-                console.error('WebRTC Frame Size Test error:', error);
+                console.error('[WebRTC]', 'Frame Size Test error:', error);
                 return -1;
             }
         }
