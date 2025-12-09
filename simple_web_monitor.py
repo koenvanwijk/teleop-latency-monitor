@@ -1085,11 +1085,10 @@ async def index_handler(request):
                         document.getElementById('webrtc-8kb').textContent = 'ERR';
                     }
                     updateTopologyDisplay();
-                    console.log('[WebRTC] All tests completed');
-                }, 3000);
-                
-                // DISABLED: 32KB test
-                /*setTimeout(async () => {
+                    console.log('[WebRTC] 8KB test completed');
+                    
+                    // 32KB Video Stream Test - wait for 8KB to complete
+                    console.log('[WebRTC] Starting 32KB test after 8KB completed');
                     document.getElementById('webrtc-32kb').textContent = 'Testing...';
                     const thirtyTwoKbLatency = await testWebRTCMediumVideo(); // 32KB
                     if (thirtyTwoKbLatency > 0) {
@@ -1098,10 +1097,10 @@ async def index_handler(request):
                         document.getElementById('webrtc-32kb').textContent = 'ERR';
                     }
                     updateTopologyDisplay();
-                }, 7000);*/ // 3.5 seconds after first test
-                
-                // DISABLED: 64KB test
-                /*setTimeout(async () => {
+                    console.log('[WebRTC] 32KB test completed');
+                    
+                    // 64KB Video Stream Test - wait for 32KB to complete
+                    console.log('[WebRTC] Starting 64KB test after 32KB completed');
                     document.getElementById('webrtc-64kb').textContent = 'Testing...';
                     const sixtyFourKbLatency = await testWebRTCHighVideo(); // 64KB
                     if (sixtyFourKbLatency > 0) {
@@ -1110,7 +1109,8 @@ async def index_handler(request):
                         document.getElementById('webrtc-64kb').textContent = 'ERR';
                     }
                     updateTopologyDisplay();
-                }, 10500);*/ // 3.5 seconds after second test
+                    console.log('[WebRTC] All tests completed');
+                }, 3000);
             };
             
             // Run tests immediately on start
@@ -1460,18 +1460,19 @@ async def index_handler(request):
                     let framesReceived = 0;
                     let frameAges = [];
                     let sendInterval = null;
-                    const targetFrames = 60;
+                    const targetFrames = 10; // Reduced for testing
                     const frameInterval = 1000 / 5; // 5 fps for testing
 
                     const negotiationTimeout = setTimeout(() => {
                         if (!resolved) {
                             resolved = true;
+                            sendInterval = 'stopped'; // Signal to stop sending
                             try { pc.close(); } catch {}
                             try { robotWs.removeEventListener('message', onSignal); } catch {}
                             console.warn('[WebRTC]', `${label} negotiation timeout`, session);
                             resolve(-1);
                         }
-                    }, 20000); // Allow time for: ICE negotiation + sending 60 frames + receiving echoes
+                    }, 20000); // Allow time for: ICE negotiation + sending 10 frames + receiving echoes
 
                     let dataChannelReady = false;
                     let peerConnectionReady = false;
@@ -1481,8 +1482,8 @@ async def index_handler(request):
                             console.log('[WebRTC]', `Starting ${label} 5fps stream (${frameSize} bytes)`, session);
                             
                             const sendNextFrame = () => {
-                                if (framesSent >= targetFrames) {
-                                    return;
+                                if (framesSent >= targetFrames || sendInterval === 'stopped' || dataChannel.readyState !== 'open') {
+                                    return; // Stop if we've sent all frames, timeout occurred, or channel closed
                                 }
                                 
                                 // Check if buffer is clear
