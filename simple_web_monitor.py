@@ -7,9 +7,11 @@ import socket
 import struct
 from aiohttp import web, WSMsgType
 import websockets
+from aiortc import RTCPeerConnection as RTCServerPeerConnection, RTCSessionDescription as RTCServerSessionDescription, RTCIceCandidate as RTCServerIceCandidate, RTCIceServer, RTCConfiguration
 
 # Store active browser connections
 browser_connections = set()
+webrtc_sessions = {}
 
 def log(msg: str) -> None:
     now = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -36,16 +38,144 @@ async def handle_robot_connection(websocket):
                     "t0": t0,
                     "t1": t1,
                 }
-                # Include ping ID in response if it was provided
                 if ping_id:
                     response["id"] = ping_id
                 await websocket.send(json.dumps(response))
+            elif msg_type == "webrtc_offer":
+                try:
+                    session_id = data.get("session")
+                    sdp = data.get("sdp", {})
+                    if not session_id or not sdp:
+                        raise ValueError("Missing session or SDP in webrtc_offer")
+
+                    # Close any existing peer connections for this websocket to avoid leaks/conflicts
+                    try:
+                        for (ws, sid), old_pc in list(webrtc_sessions.items()):
+                            if ws == websocket:
+                                await old_pc.close()
+                                del webrtc_sessions[(ws, sid)]
+                                log(f"Closed previous WebRTC session {sid} for this client")
+                    except Exception:
+                        pass
+
+                    pc = RTCServerPeerConnection(RTCConfiguration(iceServers=[
+                        RTCIceServer(urls=["stun:stun.l.google.com:19302", "stun:stun.cloudflare.com:3478"])
+                    ]))
+
+                    @pc.on("datachannel")
+                    def on_datachannel(channel):
+                        log(f"WebRTC datachannel created: {channel.label} (session {session_id})")
+                        def on_open():
+                            log(f"WebRTC datachannel open: {channel.label} (session {session_id})")
+                            try:
+                                channel.send("robot-pong")
+                                log(f"WebRTC datachannel sent robot-pong on open (session {session_id})")
+                            except Exception:
+                                pass
+                        channel.on("open", on_open)
+
+                        def on_message(message):
+                            if isinstance(message, (bytes, bytearray)):
+                                log(f"WebRTC datachannel bytes received: {len(message)} (session {session_id})")
+                                try:
+                                    channel.send(message)
+                                except Exception:
+                                    pass
+                            else:
+                                log(f"WebRTC datachannel message: {message} (session {session_id})")
+                                if message == "robot-ping":
+                                    try:
+                                        channel.send("robot-pong")
+                                        log(f"WebRTC datachannel responded robot-pong (session {session_id})")
+                                    except Exception:
+                                        pass
+                                else:
+                                    try:
+                                        channel.send(str(message))
+                                    except Exception:
+                                        pass
+                        channel.on("message", on_message)
+
+                    @pc.on("connectionstatechange")
+                    def on_conn_state_change():
+                        state = pc.connectionState
+                        log(f"WebRTC connection state: {state} (session {session_id})")
+                        if state in ("failed", "disconnected"):
+                            async def close_and_remove():
+                                try:
+                                    await pc.close()
+                                except Exception:
+                                    pass
+                                try:
+                                    if (websocket, session_id) in webrtc_sessions:
+                                        del webrtc_sessions[(websocket, session_id)]
+                                except Exception:
+                                    pass
+                            asyncio.create_task(close_and_remove())
+
+                    @pc.on("iceconnectionstatechange")
+                    def on_ice_state_change():
+                        log(f"WebRTC ICE state: {pc.iceConnectionState} (session {session_id})")
+
+                    offer = RTCServerSessionDescription(sdp=sdp.get("sdp"), type=sdp.get("type"))
+                    await pc.setRemoteDescription(offer)
+
+                    answer = await pc.createAnswer()
+                    await pc.setLocalDescription(answer)
+                    while pc.iceGatheringState != 'complete':
+                        await asyncio.sleep(0.1)
+
+                    webrtc_sessions[(websocket, session_id)] = pc
+
+                    response = {
+                        "type": "webrtc_answer",
+                        "session": session_id,
+                        "sdp": {
+                            "type": pc.localDescription.type,
+                            "sdp": pc.localDescription.sdp,
+                        },
+                    }
+                    await websocket.send(json.dumps(response))
+                except Exception as exc:
+                    log(f"WebRTC offer handling error: {exc}")
+                    await websocket.send(json.dumps({
+                        "type": "webrtc_error",
+                        "error": "offer_failed",
+                        "message": str(exc)
+                    }))
+            elif msg_type == "webrtc_ice":
+                try:
+                    session_id = data.get("session")
+                    candidate = data.get("candidate")
+                    pc = webrtc_sessions.get((websocket, session_id))
+                    if pc and candidate:
+                        # Browser sends {candidate: string, sdpMid, sdpMLineIndex}
+                        rtc_cand = RTCServerIceCandidate(
+                            sdpMid=candidate.get("sdpMid"),
+                            sdpMLineIndex=candidate.get("sdpMLineIndex"),
+                            candidate=candidate.get("candidate")
+                        )
+                        await pc.addIceCandidate(rtc_cand)
+                        log(f"Added ICE candidate for session {session_id}")
+                except Exception as exc:
+                    log(f"WebRTC ICE handling error: {exc}")
             else:
                 log(f"Received unknown message type: {msg_type}")
     except websockets.ConnectionClosed:
         log("Robot client disconnected")
     except Exception as exc:
         log(f"Error in robot connection handler: {exc}")
+    finally:
+        try:
+            for (ws, sid), pc in list(webrtc_sessions.items()):
+                if ws == websocket:
+                    try:
+                        await pc.close()
+                    except Exception:
+                        pass
+                    del webrtc_sessions[(ws, sid)]
+        except Exception:
+            pass
 
 async def ping_server(hostname):
     """Ping a server from the backend and return latency + IP"""
@@ -382,7 +512,7 @@ async def index_handler(request):
                 <div style="flex: 1; text-align: center; position: relative; margin: 0 30px;">
                     <div style="height: 4px; background: linear-gradient(90deg, #007bff, #e83e8c); border-radius: 2px; position: relative;">
                         <div style="position: absolute; top: -50px; left: 50%; transform: translateX(-50%); background: rgba(255,255,255,0.9); padding: 8px 15px; border-radius: 16px; font-weight: bold; color: #333; line-height: 1.4;">
-                            <div>
+                            <div style="font-size: 0.9em;">
                                 WebSocket RTT: <span id="topo-robot-rtt" style="color: #007bff;">--</span>ms
                             </div>
                             <div style="font-size: 0.9em;">
@@ -392,12 +522,6 @@ async def index_handler(request):
                             <div style="font-size: 0.9em;">
                                 WebRTC RTT: <span id="topo-webrtc-small" style="color: #007bff;">--</span>ms
                             </div>
-                        </div>
-                        <div style="position: absolute; bottom: -60px; left: 50%; transform: translateX(-50%); color: white; font-size: 0.9em; text-align: center;">
-                            WebSocket<br>Connection
-                        </div>
-                        <div style="position: absolute; bottom: 40px; left: 50%; transform: translateX(-50%); color: white; font-size: 0.9em; text-align: center;">
-                            WebRTC<br>Connection
                         </div>
                     </div>
                 </div>
@@ -409,7 +533,8 @@ async def index_handler(request):
                         <small style="opacity: 0.8;"><span id="topo-robot-ip">--</span></small>
                     </div>
                 </div>
-            </div>
+            </div>   
+            
             
             
             <!-- WebRTC Video Stream Tests -->
@@ -549,6 +674,15 @@ async def index_handler(request):
             </div>
         </div>
         
+        <!-- WebRTC Debug Logs -->
+        <div class="chart-container">
+            <h3>WebRTC Debug Logs</h3>
+            <div style="display:flex; gap:10px; margin-bottom:8px;">
+                <button id="webrtc-log-clear" style="padding:6px 10px;">Clear</button>
+            </div>
+            <div id="webrtc-log" style="height:180px; overflow:auto; background:#f8f9fa; border:1px solid #dee2e6; border-radius:6px; padding:8px; font-family: monospace; font-size: 12px;"></div>
+        </div>
+
         <div class="chart-container">
             <canvas id="latencyChart"></canvas>
         </div>
@@ -651,6 +785,41 @@ async def index_handler(request):
     </div>
 
     <script>
+        // Surface [WebRTC] console logs into the UI panel
+        (function() {
+            const panel = () => document.getElementById('webrtc-log');
+            function append(level, args) {
+                try {
+                    const text = Array.from(args).map(a => {
+                        if (a == null) return String(a);
+                        if (typeof a === 'object') {
+                            try { return JSON.stringify(a); } catch { return '[object]'; }
+                        }
+                        return String(a);
+                    }).join(' ');
+                    if (text.includes('[WebRTC]')) {
+                        const el = panel();
+                        if (!el) return;
+                        const line = document.createElement('div');
+                        line.textContent = `[${new Date().toLocaleTimeString()}] ${text}`;
+                        if (level === 'error') line.style.color = '#dc3545';
+                        else if (level === 'warn') line.style.color = '#856404';
+                        el.appendChild(line);
+                        while (el.children.length > 200) el.removeChild(el.firstChild);
+                        el.scrollTop = el.scrollHeight;
+                    }
+                } catch {}
+            }
+            const origLog = console.log, origWarn = console.warn, origError = console.error;
+            console.log = function(...args){ append('log', args); return origLog.apply(console, args); };
+            console.warn = function(...args){ append('warn', args); return origWarn.apply(console, args); };
+            console.error = function(...args){ append('error', args); return origError.apply(console, args); };
+            document.addEventListener('DOMContentLoaded', () => {
+                const btn = document.getElementById('webrtc-log-clear');
+                if (btn) btn.onclick = () => { const el = panel(); if (el) el.innerHTML = ''; };
+            });
+        })();
+
         // Chart setup
         const ctx = document.getElementById('latencyChart').getContext('2d');
         const chart = new Chart(ctx, {
@@ -740,19 +909,19 @@ async def index_handler(request):
         let robotWs;
         const measurements = {
             robot: [],
+            eindhovenBrowser: [],
+            eindhovenServer: [],
             amsterdamBrowser: [],
             amsterdamServer: [],
             sofiaBrowser: [],
-            sofiaServer: [],
-            eindhovenBrowser: [],
-            eindhovenServer: []
+            sofiaServer: []
         };
         let measurementInterval;
         
         // Public ping servers - using geographic targets
         const pingTargets = {
             amsterdam: 'google.nl',        // Google Netherlands (likely Amsterdam)
-            sofia: 'google.bg',            // Google Bulgaria (likely Sofia)  
+            sofia: 'google.bg',            // Google Bulgaria (likely Sofia)
             eindhoven: 'xs4all.nl'         // XS4ALL (major Dutch ISP, based in Netherlands)
         };
         
@@ -762,7 +931,9 @@ async def index_handler(request):
             amsterdamBrowser: '--',
             amsterdamServer: '--',
             sofiaBrowser: '--',
-            sofiaServer: '--'
+            sofiaServer: '--',
+            eindhovenBrowser: '--',
+            eindhovenServer: '--'
         };
         
         // Resolve hostname to IP using DNS-over-HTTPS
@@ -1129,94 +1300,141 @@ async def index_handler(request):
             updateWebRTCInfo();
         }
 
-        // WebRTC Robot Echo - simulates P2P connection to robot
+        // WebRTC Robot Echo - real peer on robot server via signaling over robotWs
         async function testWebRTCRobotEcho() {
             try {
-                const start = performance.now();
-                
-                // Create local peer connections to simulate robot connection
-                const localPc = new RTCPeerConnection();
-                const remotePc = new RTCPeerConnection();
-                
-                // Create data channel
-                const dataChannel = localPc.createDataChannel('robot-echo', {
-                    ordered: true
+                const session = Math.random().toString(36).substr(2, 9);
+                console.log('[WebRTC] Starting robot echo session', session);
+                const pc = new RTCPeerConnection({
+                    iceServers: [
+                        { urls: 'stun:stun.l.google.com:19302' },
+                        { urls: 'stun:stun.cloudflare.com:3478' }
+                    ]
                 });
+                const dataChannel = pc.createDataChannel('robot-echo', { ordered: true });
                 
                 return new Promise((resolve) => {
                     let resolved = false;
-                    const timeout = setTimeout(() => {
+                    // Separate timeouts: negotiation (until DataChannel open) and echo RTT
+                    const negotiationTimeout = setTimeout(() => {
                         if (!resolved) {
                             resolved = true;
-                            localPc.close();
-                            remotePc.close();
+                            try { pc.close(); } catch {}
+                            // Remove signaling listener on timeout
+                            try { robotWs.removeEventListener('message', onSignal); } catch {}
+                            console.warn('[WebRTC] Echo timeout for session', session);
                             resolve(-1);
                         }
-                    }, 3000);
+                    }, 10000); // allow up to 10s for ICE/DTLS
+                    let echoTimeout = null;
+                    let pingStart = null;
                     
-                    // Set up remote data channel handler
-                    remotePc.ondatachannel = (event) => {
-                        const remoteChannel = event.channel;
-                        remoteChannel.onopen = () => {
-                            // Send echo response
-                            remoteChannel.send('robot-pong');
-                        };
-                        
-                        remoteChannel.onmessage = (e) => {
-                            if (e.data === 'robot-ping') {
-                                remoteChannel.send('robot-pong');
-                            }
-                        };
-                    };
-                    
-                    // Set up local data channel
                     dataChannel.onopen = () => {
-                        dataChannel.send('robot-ping');
+                        console.log('[WebRTC] DataChannel open, sending robot-ping');
+                        try {
+                            pingStart = performance.now();
+                            dataChannel.send('robot-ping');
+                            // Wait for pong specifically (short timeout)
+                            echoTimeout = setTimeout(() => {
+                                if (!resolved) {
+                                    resolved = true;
+                                    try { pc.close(); } catch {}
+                                    try { robotWs.removeEventListener('message', onSignal); } catch {}
+                                    console.warn('[WebRTC] Echo RTT timeout (no pong) for session', session);
+                                    resolve(-1);
+                                }
+                            }, 2000);
+                        } catch {}
                     };
                     
                     dataChannel.onmessage = (e) => {
                         if (e.data === 'robot-pong' && !resolved) {
+                            console.log('[WebRTC] Received robot-pong');
                             resolved = true;
-                            clearTimeout(timeout);
+                            clearTimeout(negotiationTimeout);
+                            if (echoTimeout) clearTimeout(echoTimeout);
                             const end = performance.now();
-                            localPc.close();
-                            remotePc.close();
-                            resolve(end - start);
+                            try { pc.close(); } catch {}
+                            // Cleanup signaling listener on success
+                            try { robotWs.removeEventListener('message', onSignal); } catch {}
+                            const rtt = pingStart ? (end - pingStart) : -1;
+                            console.log('[WebRTC] Echo RTT (ms):', rtt.toFixed(1));
+                            resolve(rtt);
                         }
                     };
                     
-                    // Set up ICE candidates exchange
-                    localPc.onicecandidate = (e) => {
-                        if (e.candidate) {
-                            remotePc.addIceCandidate(e.candidate);
+                    // Do non-trickle ICE: wait for complete before sending offer
+                    pc.onicecandidate = (event) => {
+                        if (event.candidate) {
+                            // Gathering candidates; will send SDP after ICE completes
+                            console.log('[WebRTC] Gathering ICE candidate');
                         }
                     };
                     
-                    remotePc.onicecandidate = (e) => {
-                        if (e.candidate) {
-                            localPc.addIceCandidate(e.candidate);
-                        }
+                    // Listen for signaling responses (answer / ICE) without replacing existing handler
+                    const onSignal = (evt) => {
+                        try {
+                            const data = JSON.parse(evt.data);
+                            if (data.session !== session) return;
+                            if (data.type === 'webrtc_answer') {
+                                console.log('[WebRTC] Received answer for session', session);
+                                const desc = new RTCSessionDescription(data.sdp);
+                                pc.setRemoteDescription(desc).catch(() => {});
+                            } else if (data.type === 'webrtc_ice') {
+                                console.log('[WebRTC] Received ICE from server');
+                                const cand = new RTCIceCandidate(data.candidate);
+                                pc.addIceCandidate(cand).catch(() => {});
+                            }
+                        } catch {}
                     };
+                    console.log('[WebRTC] Adding signaling listener for session', session);
+                    robotWs.addEventListener('message', onSignal);
                     
-                    // Create offer and exchange
-                    localPc.createOffer().then(offer => {
-                        localPc.setLocalDescription(offer);
-                        remotePc.setRemoteDescription(offer);
-                        return remotePc.createAnswer();
-                    }).then(answer => {
-                        remotePc.setLocalDescription(answer);
-                        localPc.setRemoteDescription(answer);
+                    // Create offer and send to robot server after ICE gathering completes (non-trickle)
+                    pc.createOffer().then(offer => {
+                        console.log('[WebRTC] Created offer, setting local description');
+                        return pc.setLocalDescription(offer);
+                    }).then(async () => {
+                        // Wait for ICE gathering to complete so SDP contains candidates
+                        console.log('[WebRTC] Waiting for ICE gathering to complete');
+                        await new Promise((resolve) => {
+                            if (pc.iceGatheringState === 'complete') {
+                                resolve();
+                            } else {
+                                const onIceGatheringStateChange = () => {
+                                    if (pc.iceGatheringState === 'complete') {
+                                        pc.removeEventListener('icegatheringstatechange', onIceGatheringStateChange);
+                                        resolve();
+                                    }
+                                };
+                                pc.addEventListener('icegatheringstatechange', onIceGatheringStateChange);
+                            }
+                        });
+                        if (robotWs && robotWs.readyState === WebSocket.OPEN) {
+                            console.log('[WebRTC] Sending offer to robot server for session', session);
+                            const msg = {
+                                type: 'webrtc_offer',
+                                session: session,
+                                sdp: pc.localDescription
+                            };
+                            robotWs.send(JSON.stringify(msg));
+                        } else {
+                            console.warn('[WebRTC] robotWs not open; cannot send offer');
+                        }
                     }).catch(() => {
                         if (!resolved) {
                             resolved = true;
                             clearTimeout(timeout);
-                            localPc.close();
-                            remotePc.close();
+                            try { pc.close(); } catch {}
+                            // Cleanup signaling listener on error
+                            try { robotWs.removeEventListener('message', onSignal); } catch {}
+                            console.error('[WebRTC] Error creating/sending offer');
                             resolve(-1);
                         }
                     });
+                    
+                    // No reassignment of resolve; cleanup handled in success/timeout/error paths
                 });
-                
             } catch (error) {
                 console.error('WebRTC Robot Echo error:', error);
                 return -1;
