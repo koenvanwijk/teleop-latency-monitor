@@ -41,6 +41,14 @@ async def handle_robot_connection(websocket):
                 if ping_id:
                     response["id"] = ping_id
                 await websocket.send(json.dumps(response))
+            elif msg_type == "clock_sync":
+                # Clock synchronization: server responds with its current time
+                response = {
+                    "type": "clock_sync_response",
+                    "client_t0": data.get("t0"),
+                    "server_time": time.time() * 1000  # Convert to milliseconds to match JS performance.now()
+                }
+                await websocket.send(json.dumps(response))
             elif msg_type == "webrtc_offer":
                 try:
                     session_id = data.get("session")
@@ -59,11 +67,60 @@ async def handle_robot_connection(websocket):
                     @pc.on("datachannel")
                     def on_datachannel(channel):
                         log(f"WebRTC datachannel created: {channel.label} (session {session_id})")
+                        stream_task = None
+                        
                         def on_open():
                             log(f"WebRTC datachannel open: {channel.label} (session {session_id})")
                         channel.on("open", on_open)
 
+                        async def send_video_stream(frame_size, target_frames, frame_interval_ms):
+                            """Send video frames from server to client with server timestamps"""
+                            log(f"Starting server video stream: {frame_size} bytes, {target_frames} frames, {frame_interval_ms}ms interval (session {session_id})")
+                            frames_sent = 0
+                            
+                            try:
+                                while frames_sent < target_frames and channel.readyState == 'open':
+                                    # Create frame with server timestamp
+                                    timestamp = time.time() * 1000  # Convert to milliseconds
+                                    header = struct.pack('dd', timestamp, float(frames_sent))  # Two doubles: timestamp, frame_number
+                                    payload = bytes((frames_sent + i) % 256 for i in range(frame_size - 16))
+                                    frame = header + payload
+                                    
+                                    channel.send(frame)
+                                    frames_sent += 1
+                                    
+                                    if frames_sent % 10 == 0:
+                                        log(f"Sent frame {frames_sent}/{target_frames} (session {session_id})")
+                                    
+                                    await asyncio.sleep(frame_interval_ms / 1000.0)
+                                
+                                log(f"Video stream complete: {frames_sent} frames sent (session {session_id})")
+                            except Exception as e:
+                                log(f"Video stream error: {e} (session {session_id})")
+
                         def on_message(message):
+                            nonlocal stream_task
+                            
+                            if isinstance(message, str):
+                                try:
+                                    cmd = json.loads(message)
+                                    if cmd.get("type") == "start_stream":
+                                        # Start sending frames from server
+                                        frame_size = cmd.get("frame_size", 8192)
+                                        target_frames = cmd.get("target_frames", 60)
+                                        frame_interval = cmd.get("frame_interval", 33)  # milliseconds
+                                        
+                                        # Cancel previous stream if running
+                                        if stream_task:
+                                            stream_task.cancel()
+                                        
+                                        # Start new stream task
+                                        stream_task = asyncio.ensure_future(
+                                            send_video_stream(frame_size, target_frames, frame_interval)
+                                        )
+                                except json.JSONDecodeError:
+                                    pass
+                            
                             if isinstance(message, (bytes, bytearray)):
                                 log(f"WebRTC datachannel bytes received: {len(message)} (session {session_id})")
                                 try:
@@ -72,7 +129,7 @@ async def handle_robot_connection(websocket):
                                         log(f"WebRTC datachannel echoed {len(message)} bytes (session {session_id})")
                                 except Exception as e:
                                     log(f"WebRTC datachannel send error (bytes): {e} (session {session_id})")
-                            else:
+                            elif isinstance(message, str):
                                 log(f"WebRTC datachannel message: {message} (session {session_id})")
                                 if message == "robot-ping":
                                     try:
@@ -511,6 +568,9 @@ async def index_handler(request):
                             <div style="font-size: 0.9em;">
                                 WebRTC RTT: <span id="topo-webrtc-small" style="color: #007bff;">--</span>ms
                             </div>
+                            <div style="font-size: 0.8em; color: #6c757d; margin-top: 4px;">
+                                Clock Δ: <span id="topo-clock-offset" style="color: #6f42c1;">--</span>ms
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -896,6 +956,8 @@ async def index_handler(request):
 
         // Multiple ping targets
         let robotWs;
+        let clockOffset = 0; // Difference between server time and client time (in milliseconds)
+        let clockSyncComplete = false;
         const measurements = {
             robot: [],
             eindhovenBrowser: [],
@@ -979,7 +1041,11 @@ async def index_handler(request):
                     })
                     .catch(error => console.error('Error getting server info:', error));
                 
-                startMeasurements();
+                // Synchronize clocks before starting measurements
+                synchronizeClocks().then(() => {
+                    console.log(`[Clock Sync] Offset: ${clockOffset.toFixed(2)}ms`);
+                    startMeasurements();
+                });
             };
             
             robotWs.onmessage = function(event) {
@@ -991,6 +1057,8 @@ async def index_handler(request):
                         handleServerPingResponse(data);
                     } else if (data.type === 'server_stun_result') {
                         handleServerStunResponse(data);
+                    } else if (data.type === 'clock_sync_response') {
+                        handleClockSyncResponse(data);
                     }
                 } catch (e) {
                     console.error('Error parsing robot response:', e);
@@ -1128,6 +1196,72 @@ async def index_handler(request):
         }
         
         let pendingPings = {};
+        let clockSyncSamples = [];
+        
+        // Synchronize clocks between client and server using multiple round-trip measurements
+        async function synchronizeClocks() {
+            clockSyncSamples = [];
+            const numSamples = 10;
+            
+            console.log(`[Clock Sync] Starting synchronization with ${numSamples} samples...`);
+            
+            for (let i = 0; i < numSamples; i++) {
+                await new Promise((resolve) => {
+                    const t0 = Date.now(); // Use Date.now() for Unix timestamp in milliseconds
+                    
+                    const handler = (event) => {
+                        try {
+                            const data = JSON.parse(event.data);
+                            if (data.type === 'clock_sync_response' && data.client_t0 === t0) {
+                                const t1 = Date.now(); // Use Date.now() consistently
+                                const rtt = t1 - t0;
+                                const serverTime = data.server_time;
+                                // Assume symmetric latency: server time was measured at (t0 + rtt/2)
+                                const estimatedServerTimeAtT0 = serverTime - (rtt / 2);
+                                const offset = estimatedServerTimeAtT0 - t0;
+                                
+                                clockSyncSamples.push({ offset, rtt });
+                                robotWs.removeEventListener('message', handler);
+                                resolve();
+                            }
+                        } catch (e) {
+                            // Ignore parsing errors
+                        }
+                    };
+                    
+                    robotWs.addEventListener('message', handler);
+                    robotWs.send(JSON.stringify({ type: 'clock_sync', t0 }));
+                    
+                    // Timeout after 1 second
+                    setTimeout(() => {
+                        robotWs.removeEventListener('message', handler);
+                        resolve();
+                    }, 1000);
+                });
+                
+                // Small delay between samples
+                await new Promise(resolve => setTimeout(resolve, 50));
+            }
+            
+            // Calculate median offset (more robust than mean)
+            if (clockSyncSamples.length > 0) {
+                clockSyncSamples.sort((a, b) => a.offset - b.offset);
+                const medianIndex = Math.floor(clockSyncSamples.length / 2);
+                clockOffset = clockSyncSamples[medianIndex].offset;
+                clockSyncComplete = true;
+                
+                const rtts = clockSyncSamples.map(s => s.rtt);
+                const avgRtt = rtts.reduce((a, b) => a + b, 0) / rtts.length;
+                console.log(`[Clock Sync] Complete. Offset: ${clockOffset.toFixed(2)}ms, Avg RTT: ${avgRtt.toFixed(2)}ms`);
+            } else {
+                console.warn('[Clock Sync] Failed - no samples collected');
+                clockSyncComplete = false;
+            }
+        }
+        
+        function handleClockSyncResponse(data) {
+            // Handled inline in synchronizeClocks function
+        }
         
         function sendPing() {
             if (robotWs && robotWs.readyState === WebSocket.OPEN) {
@@ -1460,8 +1594,8 @@ async def index_handler(request):
                     let framesReceived = 0;
                     let frameAges = [];
                     let sendInterval = null;
-                    const targetFrames = 10; // Reduced for testing
-                    const frameInterval = 1000 / 5; // 5 fps for testing
+                    const targetFrames = 60; // 2 seconds at 30fps
+                    const frameInterval = 1000 / 30; // 30 fps
 
                     const negotiationTimeout = setTimeout(() => {
                         if (!resolved) {
@@ -1472,23 +1606,18 @@ async def index_handler(request):
                             console.warn('[WebRTC]', `${label} negotiation timeout`, session);
                             resolve(-1);
                         }
-                    }, 20000); // Allow time for: ICE negotiation + sending 10 frames + receiving echoes
+                    }, 20000); // Allow time for: ICE negotiation + sending 60 frames + receiving echoes
 
                     let dataChannelReady = false;
                     let peerConnectionReady = false;
 
                     const startSendingFrames = () => {
                         if (dataChannelReady && peerConnectionReady && !sendInterval) {
-                            console.log('[WebRTC]', `Starting ${label} 5fps stream (${frameSize} bytes)`, session);
-                            
-                            const sendNextFrame = () => {
-                                if (framesSent >= targetFrames || sendInterval === 'stopped' || dataChannel.readyState !== 'open') {
-                                    return; // Stop if we've sent all frames, timeout occurred, or channel closed
-                                }
-                                
-                                // Check if buffer is clear
-                                if (dataChannel.bufferedAmount > 0) {
-                                    setTimeout(sendNextFrame, 5);
+                            // Send frames at regular intervals like a video stream
+                            sendInterval = setInterval(() => {
+                                if (framesSent >= targetFrames || dataChannel.readyState !== 'open') {
+                                    clearInterval(sendInterval);
+                                    sendInterval = 'stopped';
                                     return;
                                 }
                                 
@@ -1504,31 +1633,21 @@ async def index_handler(request):
                                 try {
                                     dataChannel.send(frame);
                                     framesSent++;
-                                    if (framesSent % 10 === 0) {
-                                        console.log('[WebRTC]', `${label} sent frame #${framesSent}/${targetFrames}`, session);
-                                    }
-                                    
-                                    // Use extremely conservative fixed delay
-                                    // This ensures frames are actually sent one at a time with plenty of spacing
-                                    setTimeout(sendNextFrame, 1000); // 1000ms = 1fps (extremely conservative for testing)
                                 } catch (error) {
                                     console.warn('[WebRTC]', `${label} send error:`, error);
+                                    clearInterval(sendInterval);
+                                    sendInterval = 'stopped';
                                 }
-                            };
-                            
-                            sendInterval = true; // Mark as started
-                            sendNextFrame();
+                            }, frameInterval); // Send at steady 5fps rate
                         }
                     };
 
                     dataChannel.onopen = () => {
-                        console.log('[WebRTC]', `${label} DataChannel opened`, session);
                         dataChannelReady = true;
                         startSendingFrames();
                     };
 
                     pc.onconnectionstatechange = () => {
-                        console.log('[WebRTC]', `${label} connection state: ${pc.connectionState}`, session);
                         if (pc.connectionState === 'connected') {
                             peerConnectionReady = true;
                             startSendingFrames();
@@ -1536,18 +1655,13 @@ async def index_handler(request):
                     };
 
                     dataChannel.onmessage = async (e) => {
-                        console.log('[WebRTC]', `${label} onmessage fired! readyState=${dataChannel.readyState}`, session);
                         try {
                             let data = e.data;
-                            console.log('[WebRTC]', `${label} data type: ${typeof data}, instanceof ArrayBuffer: ${data instanceof ArrayBuffer}, instanceof Blob: ${data instanceof Blob}`, session);
                             // Convert Blob to ArrayBuffer if needed
                             if (data instanceof Blob) {
-                                console.log('[WebRTC]', `${label} converting Blob (${data.size} bytes)`, session);
                                 data = await data.arrayBuffer();
-                                console.log('[WebRTC]', `${label} converted to ArrayBuffer (${data.byteLength} bytes)`, session);
                             }
                             if (data instanceof ArrayBuffer) {
-                                console.log('[WebRTC]', `${label} processing ArrayBuffer (${data.byteLength} bytes)`, session);
                                 const receiveTime = performance.now();
                                 const frameView = new Uint8Array(data);
                                 if (frameView.byteLength < 16) {
@@ -1558,7 +1672,6 @@ async def index_handler(request):
                                 const headerArray = new Float64Array(headerBuffer);
                                 const originalTimestamp = headerArray[0];
                                 const frameNumber = headerArray[1];
-                                console.log('[WebRTC]', `${label} parsed: timestamp=${originalTimestamp}, frameNum=${frameNumber}`, session);
                                 const frameAge = receiveTime - originalTimestamp;
                                 frameAges.push(frameAge);
                                 framesReceived++;
@@ -1579,7 +1692,7 @@ async def index_handler(request):
                             console.error('[WebRTC]', `${label} onmessage error:`, error, session);
                         }
                     };
-                    console.log('[WebRTC]', `${label} onmessage handler attached`, session);
+
 
                     dataChannel.onerror = (e) => {
                         console.error('[WebRTC]', `${label} DataChannel error:`, e);
@@ -1603,7 +1716,6 @@ async def index_handler(request):
                             const data = JSON.parse(evt.data);
                             if (data.session !== session) return;
                             if (data.type === 'webrtc_answer') {
-                                console.log('[WebRTC]', 'Video answer received', session);
                                 const desc = new RTCSessionDescription(data.sdp);
                                 pc.setRemoteDescription(desc).catch(() => {});
                             } else if (data.type === 'webrtc_ice') {
@@ -1659,17 +1771,197 @@ async def index_handler(request):
             }
         }
 
+        // One-way video latency test: server sends frames, client measures arrival time
+        async function testWebRTCFrameSizeOneWay(frameSize, label) {
+            if (!clockSyncComplete) {
+                console.warn('[WebRTC]', 'Clock sync not complete, cannot do one-way test');
+                return -1;
+            }
+            
+            try {
+                const session = Math.random().toString(36).substr(2, 9);
+                console.log('[WebRTC]', `Starting ${label} one-way stream session`, session);
+                const pc = new RTCPeerConnection({
+                    iceServers: [
+                        { urls: 'stun:stun.l.google.com:19302' },
+                        { urls: 'stun:stun.cloudflare.com:3478' }
+                    ]
+                });
+
+                const dataChannel = pc.createDataChannel(`oneway-test-${frameSize}`, { ordered: true });
+
+                return new Promise((resolve) => {
+                    let resolved = false;
+                    let framesReceived = 0;
+                    let frameAges = [];
+                    const targetFrames = 60; // 2 seconds at 30fps
+                    const frameInterval = 1000 / 30; // 30 fps
+
+                    const negotiationTimeout = setTimeout(() => {
+                        if (!resolved) {
+                            resolved = true;
+                            console.warn('[WebRTC]', `${label} one-way negotiation timeout`);
+                            try { pc.close(); } catch {}
+                            try { robotWs.removeEventListener('message', onSignal); } catch {}
+                            resolve(-1);
+                        }
+                    }, 20000);
+
+                    let dataChannelReady = false;
+                    let peerConnectionReady = false;
+
+                    const startReceiving = () => {
+                        if (dataChannelReady && peerConnectionReady) {
+                            // Send command to server to start streaming
+                            const command = {
+                                type: 'start_stream',
+                                frame_size: frameSize,
+                                target_frames: targetFrames,
+                                frame_interval: frameInterval
+                            };
+                            dataChannel.send(JSON.stringify(command));
+                            console.log('[WebRTC]', `${label} requested server to start streaming`);
+                        }
+                    };
+
+                    dataChannel.onopen = () => {
+                        dataChannelReady = true;
+                        startReceiving();
+                    };
+
+                    pc.onconnectionstatechange = () => {
+                        if (pc.connectionState === 'connected') {
+                            peerConnectionReady = true;
+                            startReceiving();
+                        }
+                    };
+
+                    dataChannel.onmessage = async (e) => {
+                        try {
+                            let data = e.data;
+                            // Convert Blob to ArrayBuffer if needed
+                            if (data instanceof Blob) {
+                                data = await data.arrayBuffer();
+                            }
+                            if (data instanceof ArrayBuffer) {
+                                const receiveTime = Date.now(); // Use Date.now() for Unix timestamp
+                                const frameView = new Uint8Array(data);
+                                if (frameView.byteLength < 16) {
+                                    console.warn('[WebRTC]', `${label} frame too small: ${frameView.byteLength} bytes`, session);
+                                    return;
+                                }
+                                const headerBuffer = frameView.slice(0, 16).buffer;
+                                const headerArray = new Float64Array(headerBuffer);
+                                const serverTimestamp = headerArray[0];
+                                const frameNumber = headerArray[1];
+                                
+                                // Convert server timestamp to client time using clock offset
+                                const clientTimestamp = serverTimestamp - clockOffset;
+                                const frameAge = receiveTime - clientTimestamp;
+                                
+                                frameAges.push(frameAge);
+                                framesReceived++;
+                                console.log('[WebRTC]', `${label} received frame #${Math.floor(frameNumber)} of ${targetFrames} (one-way age: ${frameAge.toFixed(1)}ms, total received: ${framesReceived})`, session);
+                                if (framesReceived >= targetFrames && !resolved) {
+                                    resolved = true;
+                                    clearTimeout(negotiationTimeout);
+                                    const avgAge = frameAges.reduce((a, b) => a + b, 0) / frameAges.length;
+                                    console.log('[WebRTC]', `${label} one-way stream complete avg age: ${avgAge.toFixed(1)}ms`, session);
+                                    try { pc.close(); } catch {}
+                                    try { robotWs.removeEventListener('message', onSignal); } catch {}
+                                    resolve(avgAge);
+                                }
+                            }
+                        } catch (error) {
+                            console.error('[WebRTC]', `${label} onmessage error:`, error, session);
+                        }
+                    };
+
+                    dataChannel.onerror = (e) => {
+                        console.error('[WebRTC]', `${label} DataChannel error:`, e);
+                        if (!resolved) {
+                            resolved = true;
+                            clearTimeout(negotiationTimeout);
+                            try { pc.close(); } catch {}
+                            try { robotWs.removeEventListener('message', onSignal); } catch {}
+                            resolve(-1);
+                        }
+                    };
+
+                    pc.onicecandidate = (event) => {
+                        if (!event.candidate) {
+                            // Gathering candidates; will send SDP after ICE completes
+                        }
+                    };
+                    
+                    // Listen for signaling responses
+                    const onSignal = (evt) => {
+                        try {
+                            const data = JSON.parse(evt.data);
+                            if (data.session !== session) return;
+                            if (data.type === 'webrtc_answer') {
+                                const desc = new RTCSessionDescription(data.sdp);
+                                pc.setRemoteDescription(desc).catch(() => {});
+                            } else if (data.type === 'webrtc_ice') {
+                                const cand = new RTCIceCandidate(data.candidate);
+                                pc.addIceCandidate(cand).catch(() => {});
+                            }
+                        } catch {}
+                    };
+                    robotWs.addEventListener('message', onSignal);
+
+                    pc.createOffer().then(offer => {
+                        return pc.setLocalDescription(offer);
+                    }).then(async () => {
+                        await new Promise((resolve) => {
+                            if (pc.iceGatheringState === 'complete') {
+                                resolve();
+                            } else {
+                                const onIceGatheringStateChange = () => {
+                                    if (pc.iceGatheringState === 'complete') {
+                                        pc.removeEventListener('icegatheringstatechange', onIceGatheringStateChange);
+                                        resolve();
+                                    }
+                                };
+                                pc.addEventListener('icegatheringstatechange', onIceGatheringStateChange);
+                            }
+                        });
+                        if (robotWs && robotWs.readyState === WebSocket.OPEN) {
+                            const msg = {
+                                type: 'webrtc_offer',
+                                session: session,
+                                sdp: pc.localDescription
+                            };
+                            robotWs.send(JSON.stringify(msg));
+                        }
+                    }).catch((err) => {
+                        console.error('[WebRTC]', 'Error creating/sending offer', err, session);
+                        if (!resolved) {
+                            resolved = true;
+                            clearTimeout(negotiationTimeout);
+                            try { pc.close(); } catch {}
+                            try { robotWs.removeEventListener('message', onSignal); } catch {}
+                            resolve(-1);
+                        }
+                    });
+                });
+            } catch (error) {
+                console.error('[WebRTC]', 'One-way Frame Size Test error:', error);
+                return -1;
+            }
+        }
+
         // Individual frame size test functions
         async function testWebRTCVideoSimulation() {
-            return await testWebRTCFrameSize(8192, 'Low Quality (8KB)');
+            return await testWebRTCFrameSizeOneWay(8192, 'Low Quality (8KB)');
         }
         
         async function testWebRTCMediumVideo() {
-            return await testWebRTCFrameSize(32768, 'Medium Quality (32KB)');
+            return await testWebRTCFrameSizeOneWay(32768, 'Medium Quality (32KB)');
         }
         
         async function testWebRTCHighVideo() {
-            return await testWebRTCFrameSize(65536, 'High Quality (64KB)');
+            return await testWebRTCFrameSizeOneWay(65536, 'High Quality (64KB)');
         }
         
         function updateBrowserLatency(target, latency) {
@@ -1746,6 +2038,16 @@ async def index_handler(request):
             if (topoUpEl) topoUpEl.textContent = up;
             if (topoDownEl) topoDownEl.textContent = down;
             document.getElementById('topo-client-ip').textContent = document.getElementById('client-ip').textContent;
+            
+            // Update clock offset
+            const topoClockOffsetEl = document.getElementById('topo-clock-offset');
+            if (topoClockOffsetEl) {
+                if (clockSyncComplete) {
+                    topoClockOffsetEl.textContent = clockOffset.toFixed(1);
+                } else {
+                    topoClockOffsetEl.textContent = '--';
+                }
+            }
             
             // Geographic servers
             document.getElementById('topo-eindhoven-browser').textContent = document.getElementById('eindhoven-browser').textContent;
