@@ -96,9 +96,8 @@ class CameraStream:
             if not ret:
                 return None
             
-            # Convert to grayscale for smaller size
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            return gray.tobytes()
+            # Return BGR color frame (3 bytes per pixel)
+            return frame.tobytes()
         except Exception as e:
             log(f"Camera frame capture error: {e}")
             return None
@@ -1099,26 +1098,27 @@ async def index_handler(request):
                 const height = canvas.height;
                 const imageData = ctx2d.createImageData(width, height);
                 
-                // Convert grayscale frame data to RGBA
+                // Convert BGR frame data to RGBA
                 const dataView = new Uint8Array(frameData, 16); // Skip header
                 const pixels = imageData.data;
                 
                 const totalPixels = width * height;
+                const bgrBytes = totalPixels * 3; // 3 bytes per pixel for BGR
                 const availableBytes = dataView.length;
                 
-                // Check if we have enough data for the full image
-                if (availableBytes >= totalPixels) {
-                    // We have camera data - use it directly
+                // Check if we have enough data for the full color image
+                if (availableBytes >= bgrBytes) {
+                    // We have camera data (BGR format) - convert to RGBA
                     for (let i = 0; i < totalPixels; i++) {
-                        const grayValue = dataView[i];
-                        const pixelIndex = i * 4;
-                        pixels[pixelIndex] = grayValue;     // R
-                        pixels[pixelIndex + 1] = grayValue; // G
-                        pixels[pixelIndex + 2] = grayValue; // B
-                        pixels[pixelIndex + 3] = 255;       // A
+                        const bgrIndex = i * 3;
+                        const rgbaIndex = i * 4;
+                        pixels[rgbaIndex] = dataView[bgrIndex + 2];     // R (from B)
+                        pixels[rgbaIndex + 1] = dataView[bgrIndex + 1]; // G
+                        pixels[rgbaIndex + 2] = dataView[bgrIndex];     // B (from R)
+                        pixels[rgbaIndex + 3] = 255;                    // A
                     }
                 } else {
-                    // Not enough data, likely test pattern - repeat it
+                    // Not enough data, likely test pattern - repeat it as grayscale
                     for (let i = 0; i < totalPixels; i++) {
                         const grayValue = dataView[i % availableBytes];
                         const pixelIndex = i * 4;
