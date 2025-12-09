@@ -9,9 +9,106 @@ from aiohttp import web, WSMsgType
 import websockets
 from aiortc import RTCPeerConnection as RTCServerPeerConnection, RTCSessionDescription as RTCServerSessionDescription, RTCIceCandidate as RTCServerIceCandidate, RTCIceServer, RTCConfiguration
 
+try:
+    import cv2
+    import numpy as np
+    CAMERA_AVAILABLE = True
+except ImportError:
+    CAMERA_AVAILABLE = False
+    print("Warning: OpenCV not available. Camera streaming disabled.")
+
 # Store active browser connections
 browser_connections = set()
 webrtc_sessions = {}
+camera_stream = None
+
+class CameraStream:
+    """Manages camera capture and provides frames"""
+    def __init__(self, camera_id=0, width=320, height=240, fps=30):
+        self.camera_id = camera_id
+        self.width = width
+        self.height = height
+        self.fps = fps
+        self.cap = None
+        self.running = False
+        self.last_frame = None
+        self.last_frame_time = 0
+        
+    def start(self):
+        """Start camera capture"""
+        if not CAMERA_AVAILABLE:
+            log("Camera not available - OpenCV not installed")
+            return False
+            
+        try:
+            self.cap = cv2.VideoCapture(self.camera_id)
+            if not self.cap.isOpened():
+                log(f"Failed to open camera {self.camera_id}")
+                return False
+                
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+            self.cap.set(cv2.CAP_PROP_FPS, self.fps)
+            
+            # Test read
+            ret, frame = self.cap.read()
+            if not ret:
+                log("Failed to read from camera")
+                self.cap.release()
+                return False
+                
+            self.running = True
+            log(f"Camera started: {self.width}x{self.height} @ {self.fps}fps")
+            return True
+        except Exception as e:
+            log(f"Camera start error: {e}")
+            return False
+            
+    def get_frame(self):
+        """Get the latest camera frame as JPEG bytes"""
+        if not self.running or not self.cap:
+            return None
+            
+        try:
+            ret, frame = self.cap.read()
+            if not ret:
+                return None
+                
+            # Encode as JPEG
+            ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            if not ret:
+                return None
+                
+            self.last_frame = buffer.tobytes()
+            self.last_frame_time = time.time()
+            return self.last_frame
+        except Exception as e:
+            log(f"Camera frame capture error: {e}")
+            return None
+            
+    def get_frame_raw(self):
+        """Get raw frame data for DataChannel streaming"""
+        if not self.running or not self.cap:
+            return None
+            
+        try:
+            ret, frame = self.cap.read()
+            if not ret:
+                return None
+            
+            # Convert to grayscale for smaller size
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            return gray.tobytes()
+        except Exception as e:
+            log(f"Camera frame capture error: {e}")
+            return None
+            
+    def stop(self):
+        """Stop camera capture"""
+        self.running = False
+        if self.cap:
+            self.cap.release()
+            log("Camera stopped")
 
 def log(msg: str) -> None:
     now = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -73,18 +170,50 @@ async def handle_robot_connection(websocket):
                             log(f"WebRTC datachannel open: {channel.label} (session {session_id})")
                         channel.on("open", on_open)
 
-                        async def send_video_stream(frame_size, target_frames, frame_interval_ms):
+                        async def send_video_stream(frame_size, target_frames, frame_interval_ms, use_camera=False):
                             """Send video frames from server to client with server timestamps"""
-                            log(f"Starting server video stream: {frame_size} bytes, {target_frames} frames, {frame_interval_ms}ms interval (session {session_id})")
+                            log(f"Starting server video stream: {frame_size} bytes, {target_frames} frames, {frame_interval_ms}ms interval, camera={use_camera} (session {session_id})")
                             frames_sent = 0
+                            encoding_latencies = []
                             
                             try:
                                 while frames_sent < target_frames and channel.readyState == 'open':
+                                    # Measure encoding time
+                                    encode_start = time.time() * 1000
+                                    
                                     # Create frame with server timestamp
                                     timestamp = time.time() * 1000  # Convert to milliseconds
                                     header = struct.pack('dd', timestamp, float(frames_sent))  # Two doubles: timestamp, frame_number
-                                    payload = bytes((frames_sent + i) % 256 for i in range(frame_size - 16))
+                                    
+                                    if use_camera and camera_stream and camera_stream.running:
+                                        # Get real camera frame
+                                        camera_data = camera_stream.get_frame_raw()
+                                        if camera_data:
+                                            # Resize/crop to match frame_size
+                                            payload_size = frame_size - 16
+                                            camera_size = len(camera_data)
+                                            
+                                            if frames_sent == 1:  # Log on first successful frame
+                                                log(f"Using CAMERA data: {camera_size} bytes, payload size: {payload_size} bytes (session {session_id})")
+                                            
+                                            if len(camera_data) > payload_size:
+                                                payload = camera_data[:payload_size]
+                                            else:
+                                                payload = camera_data + bytes(payload_size - len(camera_data))
+                                        else:
+                                            # Fallback to synthetic data if camera fails
+                                            if frames_sent == 1:
+                                                log(f"Camera frame FAILED, using synthetic data (session {session_id})")
+                                            payload = bytes((frames_sent + i) % 256 for i in range(frame_size - 16))
+                                    else:
+                                        # Synthetic test pattern
+                                        payload = bytes((frames_sent + i) % 256 for i in range(frame_size - 16))
+                                    
                                     frame = header + payload
+                                    
+                                    encode_end = time.time() * 1000
+                                    encoding_latency = encode_end - encode_start
+                                    encoding_latencies.append(encoding_latency)
                                     
                                     channel.send(frame)
                                     frames_sent += 1
@@ -93,6 +222,23 @@ async def handle_robot_connection(websocket):
                                         log(f"Sent frame {frames_sent}/{target_frames} (session {session_id})")
                                     
                                     await asyncio.sleep(frame_interval_ms / 1000.0)
+                                
+                                # Send encoding latency statistics after stream completes
+                                if encoding_latencies:
+                                    avg_encoding = sum(encoding_latencies) / len(encoding_latencies)
+                                    min_encoding = min(encoding_latencies)
+                                    max_encoding = max(encoding_latencies)
+                                    
+                                    # Send via WebSocket to update UI
+                                    await send_ws_message(ws, {
+                                        'type': 'encoding_latency',
+                                        'avg': round(avg_encoding, 2),
+                                        'min': round(min_encoding, 2),
+                                        'max': round(max_encoding, 2),
+                                        'samples': len(encoding_latencies)
+                                    })
+                                    
+                                    log(f"Encoding latency - avg: {avg_encoding:.2f}ms, min: {min_encoding:.2f}ms, max: {max_encoding:.2f}ms (session {session_id})")
                                 
                                 log(f"Video stream complete: {frames_sent} frames sent (session {session_id})")
                             except Exception as e:
@@ -109,6 +255,7 @@ async def handle_robot_connection(websocket):
                                         frame_size = cmd.get("frame_size", 8192)
                                         target_frames = cmd.get("target_frames", 60)
                                         frame_interval = cmd.get("frame_interval", 33)  # milliseconds
+                                        use_camera = cmd.get("use_camera", False)  # Enable camera streaming
                                         
                                         # Cancel previous stream if running
                                         if stream_task:
@@ -116,7 +263,7 @@ async def handle_robot_connection(websocket):
                                         
                                         # Start new stream task
                                         stream_task = asyncio.ensure_future(
-                                            send_video_stream(frame_size, target_frames, frame_interval)
+                                            send_video_stream(frame_size, target_frames, frame_interval, use_camera)
                                         )
                                 except json.JSONDecodeError:
                                     pass
@@ -593,6 +740,14 @@ async def index_handler(request):
                         🤖<br>Robot Server<br>
                         <small style="opacity: 0.8;"><span id="topo-robot-ip">--</span></small>
                     </div>
+                    <!-- Encoding latency under robot server -->
+                    <div style="margin-top: 15px; background: #f8f9fa; padding: 8px 12px; border-radius: 8px; box-shadow: 0 2px 6px rgba(0,0,0,0.1); font-size: 0.85em;">
+                        <div style="color: #666; font-weight: bold; margin-bottom: 3px;">Server Encoding</div>
+                        <div style="font-size: 1.1em; color: #e83e8c; font-weight: bold;">
+                            <span id="topo-encoding-latency">--</span>ms
+                        </div>
+                        <div style="font-size: 0.75em; color: #888;">Camera → Frame</div>
+                    </div>
                 </div>
             </div>   
             
@@ -632,6 +787,12 @@ async def index_handler(request):
             <div style="position: absolute; top: 20px; right: 20px;">
                 <div id="topo-status" class="status disconnected" style="background: rgba(255,255,255,0.9); color: #721c24; padding: 8px 15px; border-radius: 20px; font-size: 0.9em;">
                     Connecting...
+                </div>
+                <div style="margin-top: 10px; background: rgba(255,255,255,0.9); padding: 8px 15px; border-radius: 10px; font-size: 0.85em;">
+                    <label style="cursor: pointer; display: flex; align-items: center; gap: 8px;">
+                        <input type="checkbox" id="use-camera-checkbox" checked style="cursor: pointer;"> 
+                        <span>📹 Use Server Camera</span>
+                    </label>
                 </div>
             </div>
         </div>
@@ -942,13 +1103,30 @@ async def index_handler(request):
                 const dataView = new Uint8Array(frameData, 16); // Skip header
                 const pixels = imageData.data;
                 
-                for (let i = 0; i < width * height; i++) {
-                    const grayValue = dataView[i % dataView.length];
-                    const pixelIndex = i * 4;
-                    pixels[pixelIndex] = grayValue;     // R
-                    pixels[pixelIndex + 1] = grayValue; // G
-                    pixels[pixelIndex + 2] = grayValue; // B
-                    pixels[pixelIndex + 3] = 255;       // A
+                const totalPixels = width * height;
+                const availableBytes = dataView.length;
+                
+                // Check if we have enough data for the full image
+                if (availableBytes >= totalPixels) {
+                    // We have camera data - use it directly
+                    for (let i = 0; i < totalPixels; i++) {
+                        const grayValue = dataView[i];
+                        const pixelIndex = i * 4;
+                        pixels[pixelIndex] = grayValue;     // R
+                        pixels[pixelIndex + 1] = grayValue; // G
+                        pixels[pixelIndex + 2] = grayValue; // B
+                        pixels[pixelIndex + 3] = 255;       // A
+                    }
+                } else {
+                    // Not enough data, likely test pattern - repeat it
+                    for (let i = 0; i < totalPixels; i++) {
+                        const grayValue = dataView[i % availableBytes];
+                        const pixelIndex = i * 4;
+                        pixels[pixelIndex] = grayValue;     // R
+                        pixels[pixelIndex + 1] = grayValue; // G
+                        pixels[pixelIndex + 2] = grayValue; // B
+                        pixels[pixelIndex + 3] = 255;       // A
+                    }
                 }
                 
                 // Draw to canvas
@@ -1180,6 +1358,8 @@ async def index_handler(request):
                         handleServerStunResponse(data);
                     } else if (data.type === 'clock_sync_response') {
                         handleClockSyncResponse(data);
+                    } else if (data.type === 'encoding_latency') {
+                        handleEncodingLatencyResponse(data);
                     }
                 } catch (e) {
                     console.error('Error parsing robot response:', e);
@@ -1382,6 +1562,20 @@ async def index_handler(request):
         
         function handleClockSyncResponse(data) {
             // Handled inline in synchronizeClocks function
+        }
+        
+        function handleEncodingLatencyResponse(data) {
+            const avgEncoding = data.avg || 0;
+            const minEncoding = data.min || 0;
+            const maxEncoding = data.max || 0;
+            
+            // Update topology display
+            const encodingElem = document.getElementById('topo-encoding-latency');
+            if (encodingElem) {
+                encodingElem.textContent = avgEncoding.toFixed(2);
+            }
+            
+            console.log(`Encoding latency: avg=${avgEncoding.toFixed(2)}ms, min=${minEncoding.toFixed(2)}ms, max=${maxEncoding.toFixed(2)}ms (${data.samples} frames)`);
         }
         
         function sendPing() {
@@ -1933,15 +2127,20 @@ async def index_handler(request):
 
                     const startReceiving = () => {
                         if (dataChannelReady && peerConnectionReady) {
+                            // Check if camera should be used
+                            const useCameraCheckbox = document.getElementById('use-camera-checkbox');
+                            const useCamera = useCameraCheckbox ? useCameraCheckbox.checked : false;
+                            
                             // Send command to server to start streaming
                             const command = {
                                 type: 'start_stream',
                                 frame_size: frameSize,
                                 target_frames: targetFrames,
-                                frame_interval: frameInterval
+                                frame_interval: frameInterval,
+                                use_camera: useCamera
                             };
                             dataChannel.send(JSON.stringify(command));
-                            console.log('[WebRTC]', `${label} requested server to start streaming`);
+                            console.log('[WebRTC]', `${label} requested server to start streaming (camera: ${useCamera})`);
                         }
                     };
 
@@ -2384,10 +2583,27 @@ if __name__ == "__main__":
         default=8765,
         help="Robot WebSocket server port (default: 8765)",
     )
+    parser.add_argument(
+        "--camera",
+        type=int,
+        default=-1,
+        help="Camera device ID (default: -1 for no camera, 0 for first camera)",
+    )
 
     args = parser.parse_args()
+    
+    # Initialize camera if requested  
+    if args.camera >= 0:
+        camera_stream = CameraStream(camera_id=args.camera)
+        if camera_stream.start():
+            print(f"Camera {args.camera} initialized successfully")
+        else:
+            print(f"Failed to initialize camera {args.camera}, continuing without camera")
+            camera_stream = None
 
     try:
         asyncio.run(main(args.web_port, args.robot_port))
     except KeyboardInterrupt:
         print("Servers stopped by user")
+        if camera_stream:
+            camera_stream.stop()
