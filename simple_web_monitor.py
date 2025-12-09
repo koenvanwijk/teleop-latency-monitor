@@ -552,6 +552,18 @@ async def index_handler(request):
                         💻<br>Your Computer<br>
                         <small style="opacity: 0.8;"><span id="topo-client-ip">--</span></small>
                     </div>
+                    <!-- Video Preview under Your Computer -->
+                    <div style="margin-top: 20px; background: #f8f9fa; padding: 10px; border-radius: 10px; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
+                        <div style="font-size: 0.9em; font-weight: bold; margin-bottom: 5px; color: #333;">Live Stream</div>
+                        <canvas id="video-canvas" width="320" height="240" style="border: 2px solid #ddd; background: #000; width: 100%; max-width: 240px; border-radius: 4px;"></canvas>
+                        <div style="margin-top: 5px; font-size: 0.75em; color: #666; text-align: left;">
+                            <div style="display: flex; justify-content: space-between;">
+                                <span>Frame: <span id="canvas-frame-num">--</span></span>
+                                <span>FPS: <span id="canvas-fps">--</span></span>
+                            </div>
+                            <div>Render: <span id="canvas-render-time">--</span>ms</div>
+                        </div>
+                    </div>
                 </div>
                 
                 <!-- Connection Line -->
@@ -721,6 +733,39 @@ async def index_handler(request):
                 <div class="stat-label">ms Avg Age</div>
                 <div class="stat-label" style="font-size: 0.7em; color: #888;">High quality video</div>
             </div>
+            <div class="stat-card">
+                <div class="stat-label">Render Latency</div>
+                <div id="render-latency" class="stat-value" style="color: #17a2b8;">--</div>
+                <div class="stat-label">ms Avg</div>
+                <div class="stat-label" style="font-size: 0.7em; color: #888;">Decode + Display</div>
+            </div>
+        </div>
+        
+        <!-- Rendering Metrics -->
+        <div class="chart-container">
+            <h3>Video Rendering Metrics</h3>
+            <div style="background: #f8f9fa; padding: 20px; border-radius: 8px;">
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px;">
+                    <div>
+                        <div style="font-weight: bold; color: #666; margin-bottom: 5px;">Receive → Render</div>
+                        <div style="font-size: 1.8em; color: #17a2b8;"><span id="receive-to-render">--</span>ms</div>
+                        <div style="font-size: 0.8em; color: #888;">Time to display frame</div>
+                    </div>
+                    <div>
+                        <div style="font-weight: bold; color: #666; margin-bottom: 5px;">Canvas Draw Time</div>
+                        <div style="font-size: 1.8em; color: #28a745;"><span id="canvas-draw-time">--</span>ms</div>
+                        <div style="font-size: 0.8em; color: #888;">Pixel manipulation</div>
+                    </div>
+                    <div>
+                        <div style="font-weight: bold; color: #666; margin-bottom: 5px;">Total Frames</div>
+                        <div style="font-size: 1.8em; color: #6f42c1;"><span id="total-frames-rendered">0</span></div>
+                        <div style="font-size: 0.8em; color: #888;">Rendered to canvas</div>
+                    </div>
+                </div>
+                <div style="margin-top: 15px; font-size: 0.9em; color: #666; padding-top: 15px; border-top: 1px solid #ddd;">
+                    <strong>Note:</strong> This measures the time between receiving a frame and displaying it on the canvas, including any browser decoding overhead.
+                </div>
+            </div>
         </div>
         
         <!-- WebRTC Debug Logs -->
@@ -868,6 +913,82 @@ async def index_handler(request):
                 if (btn) btn.onclick = () => { const el = panel(); if (el) el.innerHTML = ''; };
             });
         })();
+
+        // Canvas setup for video rendering
+        let canvas, ctx2d;
+        let renderLatencies = [];
+        let totalFramesRendered = 0;
+        let lastFrameTime = 0;
+        let frameCount = 0;
+        let fpsUpdateTime = Date.now();
+        
+        document.addEventListener('DOMContentLoaded', () => {
+            canvas = document.getElementById('video-canvas');
+            ctx2d = canvas ? canvas.getContext('2d') : null;
+        });
+        
+        function renderFrameToCanvas(frameData, frameNumber) {
+            if (!ctx2d || !canvas) return;
+            
+            const renderStartTime = performance.now();
+            
+            try {
+                // Create ImageData from frame bytes (skip 16-byte header)
+                const width = canvas.width;
+                const height = canvas.height;
+                const imageData = ctx2d.createImageData(width, height);
+                
+                // Convert grayscale frame data to RGBA
+                const dataView = new Uint8Array(frameData, 16); // Skip header
+                const pixels = imageData.data;
+                
+                for (let i = 0; i < width * height; i++) {
+                    const grayValue = dataView[i % dataView.length];
+                    const pixelIndex = i * 4;
+                    pixels[pixelIndex] = grayValue;     // R
+                    pixels[pixelIndex + 1] = grayValue; // G
+                    pixels[pixelIndex + 2] = grayValue; // B
+                    pixels[pixelIndex + 3] = 255;       // A
+                }
+                
+                // Draw to canvas
+                ctx2d.putImageData(imageData, 0, 0);
+                
+                const renderEndTime = performance.now();
+                const renderTime = renderEndTime - renderStartTime;
+                
+                // Update stats
+                totalFramesRendered++;
+                renderLatencies.push(renderTime);
+                if (renderLatencies.length > 60) renderLatencies.shift();
+                
+                document.getElementById('canvas-frame-num').textContent = frameNumber;
+                document.getElementById('canvas-render-time').textContent = renderTime.toFixed(2);
+                document.getElementById('canvas-draw-time').textContent = renderTime.toFixed(2);
+                document.getElementById('total-frames-rendered').textContent = totalFramesRendered;
+                
+                // Calculate FPS
+                frameCount++;
+                const now = Date.now();
+                if (now - fpsUpdateTime >= 1000) {
+                    const fps = frameCount / ((now - fpsUpdateTime) / 1000);
+                    document.getElementById('canvas-fps').textContent = fps.toFixed(1);
+                    frameCount = 0;
+                    fpsUpdateTime = now;
+                }
+                
+                // Update average render latency
+                if (renderLatencies.length > 0) {
+                    const avgRenderLatency = renderLatencies.reduce((a, b) => a + b, 0) / renderLatencies.length;
+                    document.getElementById('render-latency').textContent = Math.round(avgRenderLatency);
+                }
+                
+                return renderTime;
+            } catch (error) {
+                console.error('Canvas render error:', error);
+                return 0;
+            }
+        }
 
         // Chart setup
         const ctx = document.getElementById('latencyChart').getContext('2d');
@@ -1859,9 +1980,18 @@ async def index_handler(request):
                                 const clientTimestamp = serverTimestamp - clockOffset;
                                 const frameAge = receiveTime - clientTimestamp;
                                 
+                                // Render frame to canvas and measure rendering time
+                                const renderStartTime = performance.now();
+                                const renderTime = renderFrameToCanvas(data, Math.floor(frameNumber));
+                                const renderEndTime = performance.now();
+                                const totalRenderTime = renderEndTime - renderStartTime;
+                                
+                                // Update receive-to-render metric
+                                document.getElementById('receive-to-render').textContent = totalRenderTime.toFixed(2);
+                                
                                 frameAges.push(frameAge);
                                 framesReceived++;
-                                console.log('[WebRTC]', `${label} received frame #${Math.floor(frameNumber)} of ${targetFrames} (one-way age: ${frameAge.toFixed(1)}ms, total received: ${framesReceived})`, session);
+                                console.log('[WebRTC]', `${label} received frame #${Math.floor(frameNumber)} of ${targetFrames} (one-way age: ${frameAge.toFixed(1)}ms, render: ${totalRenderTime.toFixed(1)}ms, total received: ${framesReceived})`, session);
                                 if (framesReceived >= targetFrames && !resolved) {
                                     resolved = true;
                                     clearTimeout(negotiationTimeout);
